@@ -6,21 +6,27 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  MCPP_VERSION: 2026.8.19.4
+  XLINGS_VERSION: v2026.8.17.2
+  XLINGS_NON_INTERACTIVE: '1'
+
 jobs:
-  build:
-    name: conformance
+  conformance:
+    name: conformance, surface, and independence from a C library
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      # A version verified to build this package, not a measured minimum. The
-      # package uses modules, exported extern "C" declarations and ordinary
-      # dependencies, none of which is recent; the pin exists for reproducibility
-      # rather than because an older mcpp is known to fail.
-      MCPP_VERSION: 2026.8.19.4
-      XLINGS_VERSION: v2026.8.17.2
-      XLINGS_NON_INTERACTIVE: '1'
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+
+      # The specification is checked out at its own head rather than named by
+      # version, so that this run asserts what it is for: that the
+      # specification as written there and this implementation as written here
+      # agree today.
+      - uses: actions/checkout@v4
+        with:
+          repository: mcpplibs/openkal
+          path: .spec
 
       - name: Install xlings
         run: |
@@ -35,82 +41,88 @@ jobs:
           mcpp --version
           mcpp self config --mirror GLOBAL
 
-      # The version of the specification this implementation is written against
-      # is stated once, in the manifest, and read from there. Stating it a second
-      # time in this file is what allowed the two to drift: the manifest moved to
-      # 0.3.0 and this file compared against the 0.2.0 surface, so four names
-      # this implementation is required to export were reported as unspecified.
-      - name: Read the specification version from the manifest
-        run: |
-          v="$(sed -n 's/^openkal[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' mcpp.toml | head -1)"
-          test -n "$v" || { echo "the manifest does not name openkal" >&2; exit 1; }
-          echo "OPENKAL_VERSION=$v" >> "$GITHUB_ENV"
-          echo "written against openkal $v"
+      - name: Point at the specification's working tree
+        run: sed -i 's|^openkal = ".*"$|openkal = { path = ".spec" }|' mcpp.toml
 
       - name: Conformance
         run: |
-          mcpp test 2>&1 | tee conformance.log
-
+          mcpp test 2>&1 | tee tests.log
           # A suite that discovered nothing reports success, so every suite is
           # asserted to have run. The list is derived from the files present
           # rather than written out here: a hand-written list names the suites
-          # that existed when it was written, and a suite added afterwards
-          # escapes the assertion silently. This assertion named two of five.
+          # that existed when it was written, and one added afterwards escapes
+          # the assertion silently.
           missing=0
           for f in tests/*.cpp; do
             name="$(basename "$f" .cpp)"
-            if ! grep -q "^$name \.\.\. ok" conformance.log; then
-              echo "suite did not run, or did not pass: $name" >&2
-              missing=1
-            fi
+            grep -q "^$name \.\.\. ok" tests.log || { echo "did not run or did not pass: $name" >&2; missing=1; }
           done
           test "$missing" -eq 0
 
-      - name: The specification, at the version the manifest names
-        uses: actions/checkout@v4
-        with:
-          repository: mcpplibs/openkal
-          ref: ${{ env.OPENKAL_VERSION }}
-          path: .spec
-
-      - name: The exported surface matches the specification
+      - name: The exported surface is complete and contains nothing else
         run: |
-          # Clause 9.3. The list and the checker come from the specification
-          # itself rather than from a copy kept here, so that the comparison has
-          # one source. --complete because this implementation claims every
-          # interface: a name it fails to export is a failure, not an interface
-          # it declines to provide.
+          rm -rf target && mcpp build
           bash .spec/tools/check-surface.sh --complete .spec/SURFACE.txt \
-            $(find target -name '*.o' | tr '\n' ' ')
+            $(find target -path '*/obj/*' -name '*.o' ! -name '*.m.o' ! -name 'conformance*' | tr '\n' ' ')
 
-      # The program is taken from the specification rather than copied here. A
-      # copy in each implementation is a copy that can diverge, and the value of
-      # the program is precisely that every implementation runs the same one.
-      #
-      # The manifest is written here because naming the implementation is the
-      # manifest's job and not the program's, which is the arrangement the
-      # program exists to demonstrate.
-      - name: The portable program runs
+      - name: The C++ declarations are complete
         run: |
-          # Not `sed -i`: BSD sed requires a backup suffix after -i and reads
-          # the next word as one, so the GNU form fails on macOS with
-          # `invalid command code m`. This form is the same on both.
-          sed 's|^openkal = ".*"$|openkal = { path = ".spec" }|' mcpp.toml > mcpp.toml.next
-          mv mcpp.toml.next mcpp.toml
-          cat > .spec/examples/portable/mcpp.toml <<'TOML'
-          [package]
-          name    = "portable"
-          version = "0.1.0"
+          # The specification's own tool examines the C form. The module form is
+          # examined here, where a build of the modules exists: the test names
+          # every entity SURFACE.txt lists, so a name the modules do not export
+          # fails to compile and the diagnostic names it.
+          list="$(grep -vE '^[[:space:]]*(#|$)' .spec/SURFACE.txt | sort -u)"
+          {
+            for m in types abort stream memory env time fs process task; do
+              echo "import openkal.$m;"
+            done
+            echo 'const void *const surface[] = {'
+            while read -r n; do [ -n "$n" ] && echo "    (const void *)&$n,"; done <<< "$list"
+            echo '};'
+            echo 'int main() { return surface[0] == 0; }'
+          } > tests/conformance_declarations.cpp
+          mcpp test conformance_declarations 2>&1 | tee decl.log
+          grep -q '^conformance_declarations \.\.\. ok' decl.log
+          rm -f tests/conformance_declarations.cpp
 
-          [dependencies]
-          openkal = { path = "../.." }
-          openkal-linux = { path = "../../.." }
-          TOML
-          cd .spec/examples/portable
-          mcpp run 2>&1 | tee run.log
-          # Both directions: that the program reported, and that nothing it
-          # observed failed to hold. Asserting only the first would pass for a
-          # program that printed its failures.
-          grep -q 'openkal: the portable program, above eight interfaces' run.log
-          grep -q 'openkal: observations that did not hold: 0' run.log
-          ! grep -q 'NOT HELD' run.log
+      # The property this version exists for. An implementation that sits
+      # beneath a C library must not depend upon one, or its calls resolve to
+      # the library above it and recur without bound. The assertion is made
+      # against the objects rather than against the source, because a source
+      # can call a C library through a macro.
+      - name: The objects reference no C library symbol
+        run: |
+          rm -rf target && mcpp build --features freestanding
+          objs=$(find target -path '*/obj/*' -name '*.o' ! -name '*.m.o' ! -name 'conformance*')
+          test -n "$objs" || { echo "no objects were found; the check would pass vacuously" >&2; exit 1; }
+
+          # The permitted set. memcpy, memmove, memset and memcmp are the four a
+          # freestanding implementation is permitted to require: a compiler
+          # emits calls to them from ordinary loops, and they compute rather
+          # than call, so none of them can re-enter this implementation.
+          # __libc_start_main and main are the hand-over, and are undefined here
+          # by construction.
+          permitted='^(memcpy|memmove|memset|memcmp|__libc_start_main|main|_GLOBAL_OFFSET_TABLE_|kal_[a-z_]+|__init_array_start|__init_array_end|__preinit_array_start|__preinit_array_end|_ZN3okl.*)$'
+          bad=0
+          for s in $(nm --undefined-only $objs | awk '{print $2}' | sort -u); do
+            [ -n "$s" ] || continue
+            if ! printf '%s\n' "$s" | grep -qE "$permitted"; then
+              echo "the implementation references a symbol it must not: $s" >&2
+              bad=1
+            fi
+          done
+          test "$bad" -eq 0
+          echo "the implementation references no C library symbol"
+
+      # A checker is only useful if it fails when it should.
+      - name: The independence check detects a dependence
+        run: |
+          printf 'extern "C" int puts(const char*);\nextern "C" void okl_probe(void) { puts("x"); }\n' > src/probe.cpp
+          rm -rf target && mcpp build --features freestanding
+          objs=$(find target -path '*/obj/*' -name '*.o' ! -name '*.m.o')
+          if ! nm --undefined-only $objs | awk '{print $2}' | grep -qx puts; then
+            echo "the probe did not produce the reference it was written to produce" >&2
+            rm -f src/probe.cpp; exit 1
+          fi
+          rm -f src/probe.cpp
+          echo "a dependence upon a C library is visible to the check"

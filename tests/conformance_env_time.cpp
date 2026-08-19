@@ -43,7 +43,7 @@ int main() {
 
     // The wall source is claimed by this implementation, so it must report a
     // time after the specification was written rather than zero.
-    check(kal::time::has(kal::time::prop_wall_available), "the wall source is claimed");
+    check(kal::time::has(kal::time::wall_available), "the wall source is claimed");
     check(kal::time::wall() > 1700000000ull * 1000000000ull,
           "the wall source reports a plausible time");
 
