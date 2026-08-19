@@ -13,6 +13,3 @@ openkal = "0.2.0"
 # The package contributes definitions and no modules. The interface it
 # implements is declared by the specification package, which this package
 # imports and does not re-export.
-[targets.openkal-linux]
-kind    = "lib"
-sources = ["src/**/*.cpp"]
