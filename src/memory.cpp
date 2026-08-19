@@ -1,7 +1,6 @@
 #include <stdlib.h>
 #include <stddef.h>
-import openkal.decl.memory;
-import openkal.decl.types;
+import openkal.memory;
 
 extern "C" {
 

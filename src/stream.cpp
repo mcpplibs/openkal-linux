@@ -1,7 +1,6 @@
 #include <unistd.h>
 #include <errno.h>
-import openkal.decl.stream;
-import openkal.decl.types;
+import openkal.stream;
 
 namespace {
 

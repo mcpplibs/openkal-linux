@@ -12,17 +12,17 @@ that other implementations follow.
 | `openkal.stream` | descriptors 0, 1 and 2; writes are completed or reported |
 | `openkal.memory` | built upon the C library allocator, as clause 7.3 requires |
 
-Vectored writes are not provided. The absence is expressed by declaring nothing,
-and `kal::has_write_vectored<kal::stream>` is correspondingly false.
+The package declares no module. The interface belongs to the specification
+package, which this package imports in order to define what it declares.
 
 ## Use
 
 ```toml
 [dependencies]
-openkal = "0.1.0"
+openkal = "0.2.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.1.0"
+openkal-linux = "0.2.0"
 ```
 
 ## Points of interest for other implementations
@@ -30,9 +30,10 @@ openkal-linux = "0.1.0"
 The implementation is short, and the following aspects of it are the ones the
 specification expects to be reproduced.
 
-**The interface module adds nothing.** `src/stream.cppm` consists of an export
-and a re-export. An implementation may add only the overloads the specification
-lists as optional capabilities of the interface, and this one adds none.
+**The package exports no module.** An implementation contributes definitions.
+The interface is the specification's, and an implementation that exported one
+would place a name the consumer relies upon outside the specification's
+control.
 
 **Interruption is retried, not reported.** A caller cannot distinguish an
 interrupted call from a genuine failure without knowledge of the platform. An

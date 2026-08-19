@@ -5,5 +5,5 @@ name    = "hello"
 version = "0.1.0"
 
 [dependencies]
-openkal       = "0.1.0"
+openkal       = { path = "../../../openkal" }
 openkal-linux = { path = "../.." }

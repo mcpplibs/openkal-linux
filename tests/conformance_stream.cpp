@@ -44,10 +44,10 @@ int main() {
     // Flushing an unbuffered stream succeeds.
     check(kal::flush(kal::out()) == kal_ok, "flush succeeds");
 
-    // The negative half: this implementation does not provide vectored writes,
-    // and the detection predicate must agree with that.
-    static_assert(!kal::has_write_vectored<kal::stream>,
-                  "openkal-linux does not provide vectored writes");
+    // The negative half of the claim is verified statically, outside this
+    // program, by comparing the exported names of the implementation against
+    // the specification's list. Version 0.2 defines no optional operation, so
+    // there is nothing here for a compile-time assertion to check.
 
     return failures == 0 ? 0 : 1;
 }

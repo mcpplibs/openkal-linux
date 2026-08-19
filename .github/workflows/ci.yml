@@ -45,7 +45,7 @@ jobs:
 
       - name: The exported surface matches the specification
         env:
-          OPENKAL_VERSION: 0.1.0
+          OPENKAL_VERSION: 0.2.0
         run: |
           # Clause 9.3. The list is fetched from the specification repository at
           # the version this implementation is written against, so that the

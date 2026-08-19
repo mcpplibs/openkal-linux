@@ -1,7 +1,6 @@
 #include <unistd.h>
 #include <stdlib.h>
-import openkal.decl.abort;
-import openkal.decl.types;
+import openkal.abort;
 
 extern "C" {
 

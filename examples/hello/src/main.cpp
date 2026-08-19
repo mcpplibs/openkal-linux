@@ -12,14 +12,9 @@ int main() {
     kal::write(kal::out(), report, n);
     kal::free(region, 64, 8);
 
-    // A capability the implementation does not provide is detected at compile
-    // time, so the program selects an alternative without a run-time test.
-    if constexpr (kal::has_write_vectored<kal::stream>) {
-        const char v[] = "openkal: vectored writes available\n";
-        kal::write(kal::out(), v, sizeof(v) - 1);
-    } else {
-        const char v[] = "openkal: vectored writes unavailable\n";
-        kal::write(kal::out(), v, sizeof(v) - 1);
-    }
+    // The program imports openkal and names no implementation. Which
+    // implementation supplies the definitions is decided in the manifest.
+    const char done[] = "openkal: the program named no implementation\n";
+    kal::write(kal::out(), done, sizeof(done) - 1);
     return 0;
 }

@@ -1,11 +1,18 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-linux"
-version     = "0.1.0"
+version     = "0.2.0"
 description = "The reference implementation of openkal for Linux. It is both a usable backend and the worked example other implementations follow."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
 repo        = "https://github.com/mcpplibs/openkal-linux"
 
 [dependencies]
-openkal = "0.1.0"
+openkal = "0.2.0"
+
+# The package contributes definitions and no modules. The interface it
+# implements is declared by the specification package, which this package
+# imports and does not re-export.
+[targets.openkal-linux]
+kind    = "lib"
+sources = ["src/**/*.cpp"]
