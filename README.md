@@ -19,10 +19,10 @@ package, which this package imports in order to define what it declares.
 
 ```toml
 [dependencies]
-openkal = "0.2.0"
+openkal = "0.3.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.2.0"
+openkal-linux = "0.3.0"
 ```
 
 ## Points of interest for other implementations
