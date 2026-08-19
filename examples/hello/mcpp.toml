@@ -1,0 +1,9 @@
+# The program declares the contract it is written against and the
+# implementation that satisfies it. The source below names neither.
+[package]
+name    = "hello"
+version = "0.1.0"
+
+[dependencies]
+openkal       = "0.1.0"
+openkal-linux = { path = "../.." }
