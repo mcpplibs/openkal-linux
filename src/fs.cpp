@@ -61,8 +61,8 @@ int kind_of(okl_u32 mode) {
 void fill_info(const okl::kstat& st, kal_node_info* out) {
     *out = kal_node_info{
         static_cast<kal_uintptr>(st.size),
-        static_cast<__UINT64_TYPE__>(st.mtime_sec) * 1000000000u
-            + static_cast<__UINT64_TYPE__>(st.mtime_nsec),
+        static_cast<kal_u64>(st.mtime_sec) * 1000000000u
+            + static_cast<kal_u64>(st.mtime_nsec),
         kind_of(st.mode),
         (st.mode & 0200u) != 0 ? 1 : 0,
     };
@@ -160,7 +160,7 @@ kal_uintptr kal_fs_stream(kal_file f) {
     return fd < 0 ? 0u : static_cast<kal_uintptr>(fd);
 }
 
-int kal_fs_seek(kal_file f, __INT64_TYPE__ offset, int whence, __UINT64_TYPE__* result) {
+int kal_fs_seek(kal_file f, kal_i64 offset, int whence, kal_u64* result) {
     const int fd = okl::unpack(f.h);
     if (fd < 0) return kal_err_invalid;
     int w = 0;
@@ -168,11 +168,11 @@ int kal_fs_seek(kal_file f, __INT64_TYPE__ offset, int whence, __UINT64_TYPE__* 
     else if (whence == KAL_SEEK_END) w = 2;
     const okl_long r = okl::sys(okl::nr_lseek, fd, static_cast<okl_long>(offset), w);
     if (okl::failed(r)) return okl::translate(r);
-    if (result) *result = static_cast<__UINT64_TYPE__>(r);
+    if (result) *result = static_cast<kal_u64>(r);
     return kal_ok;
 }
 
-int kal_fs_truncate(kal_file f, __UINT64_TYPE__ size) {
+int kal_fs_truncate(kal_file f, kal_u64 size) {
     const int fd = okl::unpack(f.h);
     if (fd < 0) return kal_err_invalid;
     const okl_long r = okl::sys(okl::nr_ftruncate, fd, static_cast<okl_long>(size));
@@ -208,6 +208,25 @@ int kal_fs_file_info(kal_file f, kal_node_info* out) {
     if (okl::failed(r)) return okl::translate(r);
     fill_info(st, out);
     return kal_ok;
+}
+
+int kal_fs_set_modified(kal_file f, kal_u64 modified_ns) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0) return kal_err_invalid;
+    // The kernel's operation takes two times and this interface names one, so
+    // the other is given the value that means "leave it alone". Setting the
+    // access time to the value openkal did not ask about would be an effect the
+    // caller did not request and could not have predicted.
+    constexpr okl_i64 utime_omit = 0x3ffffffe;
+    okl::ktimespec times[2];
+    times[0].sec = 0;  times[0].nsec = utime_omit;
+    times[1].sec = static_cast<okl_i64>(modified_ns / 1000000000u);
+    times[1].nsec = static_cast<okl_i64>(modified_ns % 1000000000u);
+    // A null name and a descriptor is this kernel's spelling of "the open file
+    // itself" rather than "a name beneath it".
+    const okl_long r = okl::sys(okl::nr_utimensat, fd, 0,
+                                reinterpret_cast<okl_long>(times), 0);
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
 int kal_fs_mkdir(kal_dir base, const char* name, kal_uintptr len) {

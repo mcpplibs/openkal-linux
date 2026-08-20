@@ -225,8 +225,8 @@ kal_uintptr kal_task_current(void) {
 // The primitive. It is the operation a caller cannot construct: the comparison
 // and the suspension occur without an intervening opportunity for the value to
 // change unobserved, and only the environment can arrange that.
-int kal_task_wait(const __UINT32_TYPE__* word, __UINT32_TYPE__ expected,
-                  __UINT64_TYPE__ timeout_ns) {
+int kal_task_wait(const kal_u32* word, kal_u32 expected,
+                  kal_u64 timeout_ns) {
     okl::ktimespec ts{};
     okl_long tp = 0;
     if (timeout_ns != 0) {
@@ -248,7 +248,7 @@ int kal_task_wait(const __UINT32_TYPE__* word, __UINT32_TYPE__ expected,
     }
 }
 
-int kal_task_wake(const __UINT32_TYPE__* word, kal_uintptr count, kal_uintptr* woken) {
+int kal_task_wake(const kal_u32* word, kal_uintptr count, kal_uintptr* woken) {
     const okl_long r = okl::sys(okl::nr_futex, reinterpret_cast<okl_long>(word),
                                 okl::futex_wake | okl::futex_private,
                                 static_cast<okl_long>(count), 0, 0, 0);

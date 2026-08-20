@@ -18,16 +18,16 @@ void check(bool ok, const char* what) {
 
 // Shared between contexts. The word is what openkal.task suspends upon, and it
 // is ordinary memory: the interface adds no object of its own.
-volatile __UINT32_TYPE__ g_word = 0;
+volatile kal_u32 g_word = 0;
 int g_ran = 0;
 
 void worker(void* arg) {
     g_ran = 1;
     *static_cast<int*>(arg) = 42;
-    __atomic_store_n(reinterpret_cast<__UINT32_TYPE__*>(const_cast<__UINT32_TYPE__*>(&g_word)),
+    __atomic_store_n(reinterpret_cast<kal_u32*>(const_cast<kal_u32*>(&g_word)),
                      1u, __ATOMIC_SEQ_CST);
     kal_uintptr woken = 0;
-    kal_task_wake(const_cast<const __UINT32_TYPE__*>(&g_word), 1, &woken);
+    kal_task_wake(const_cast<const kal_u32*>(&g_word), 1, &woken);
 }
 }
 
@@ -134,9 +134,9 @@ int main() {
     // Suspension upon the word, which the worker changes and then wakes. The
     // loop re-examines the condition after waking, because waking is permitted
     // to be spurious and the specification says so.
-    while (__atomic_load_n(reinterpret_cast<__UINT32_TYPE__*>(
-               const_cast<__UINT32_TYPE__*>(&g_word)), __ATOMIC_SEQ_CST) == 0u) {
-        kal_task_wait(const_cast<const __UINT32_TYPE__*>(&g_word), 0u,
+    while (__atomic_load_n(reinterpret_cast<kal_u32*>(
+               const_cast<kal_u32*>(&g_word)), __ATOMIC_SEQ_CST) == 0u) {
+        kal_task_wait(const_cast<const kal_u32*>(&g_word), 0u,
                       1000ull * 1000 * 1000);
     }
     check(kal_task_join(t) == kal_ok, "the context is joined");
@@ -144,7 +144,7 @@ int main() {
 
     // A wait whose expected value does not match returns rather than suspending,
     // which is what makes the primitive usable without losing a wake.
-    __UINT32_TYPE__ other = 5;
+    kal_u32 other = 5;
     check(kal_task_wait(&other, 6u, 1000ull * 1000) == kal_ok,
           "a wait on a value that already differs returns");
 

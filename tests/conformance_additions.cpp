@@ -84,7 +84,7 @@ int main() {
         // Positioning at the start and then writing must still append. An
         // implementation that ignored the flag would produce "two" and report
         // success for every call.
-        __UINT64_TYPE__ at = 0;
+        kal_u64 at = 0;
         kal_fs_seek(a, 0, kal::fs::seek_set, &at);
         kal_stream_write(kal_stream{kal_fs_stream(a)}, "two", 3);
         kal_fs_close_file(a);

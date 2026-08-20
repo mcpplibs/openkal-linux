@@ -96,7 +96,7 @@ enum : okl_long {
     nr_clock_getres = 229, nr_exit_group = 231, nr_tgkill = 234,
     nr_openat = 257, nr_mkdirat = 258, nr_newfstatat = 262, nr_unlinkat = 263,
     nr_renameat = 264, nr_readlinkat = 267, nr_dup3 = 292, nr_execveat = 322,
-    nr_dup2 = 33,
+    nr_dup2 = 33, nr_utimensat = 280,
 };
 
 #elif defined(__aarch64__)
@@ -169,7 +169,7 @@ enum : okl_long {
     nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226,
     nr_clone = 220, nr_execve = 221, nr_wait4 = 260, nr_renameat = 38,
     nr_dup3 = 24, nr_execveat = 281, nr_dup2 = -1,
-    nr_arch_prctl = -1,
+    nr_arch_prctl = -1, nr_utimensat = 88,
 };
 
 #else
