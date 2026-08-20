@@ -45,28 +45,44 @@ second and third.
 All eight. `tools/check-surface.sh --complete` in the specification package
 compares the exported names against `SURFACE.txt`.
 
-## The `freestanding` feature
+## Conformance
 
-A program that has no C library of its own — one that *is* a C library — needs
-things a C library's first object ordinarily supplies, and there is nothing else
-in such a program that can supply them. The feature adds three:
+The suite lives in the specification package and is the same suite every
+implementation runs. That it is the same suite is the point: a conformance suite
+that differed between implementations would be testing implementations rather
+than the specification.
+
+```bash
+git clone https://github.com/mcpplibs/openkal .spec
+bash .spec/tools/run-conformance.sh openkal-linux . full
+```
+
+This package's own `tests/` are additional, and examine the operations version
+0.5 added rather than repeating what the shared suite already observes.
+
+## The `standalone` feature
+
+Whether this implementation is the whole of the program's environment.
+
+openkal says nothing about what else a program contains, and there are two
+arrangements. Ordinarily a program already carries a runtime of its own; that
+runtime has already received control from the environment and already creates
+execution contexts, and this implementation borrows both. That is the default.
+
+Sometimes there is no such runtime — because the program supplies one itself, or
+because it has none. Then nothing in the program has received control and
+nothing creates contexts, and this implementation does both:
 
 | | |
 | --- | --- |
-| the program entry | `_start`, which finds what the kernel left on the stack, establishes the thread pointer, and hands control to `__libc_start_main` |
+| the program entry | `_start`, which finds what the kernel left on the stack, establishes the thread pointer, and hands control to whatever the program calls its beginning |
 | thread-local storage | a block per execution context, built from the program's own `PT_TLS` segment, installed through the register the processor reserves |
-| execution contexts | `clone` directly, rather than the C library's threads |
+| execution contexts | `clone` directly |
 
-Without the feature, execution contexts come from the C library the program is
-linked against, and a context obtained from them may call anything the program
-can call. That is the ordinary configuration and it is the default.
-
-The feature is not a faster or smaller variant of the default. A program that
-is a C library has no other library to obtain threads from, so the choice there
-is between creating contexts here and not providing `openkal.task` at all.
-
-A consumer does not ordinarily request the feature. `openkal-musl` requests it,
-because a C library is the consumer it describes.
+The feature is a statement about the program, not a smaller or faster variant of
+this implementation, and the consumer that knows which arrangement holds is the
+one that declares it. `openkal-musl` declares it, because a program above a C
+library carries no other runtime by construction.
 
 ## Points of interest for other implementations
 
@@ -100,9 +116,9 @@ descriptor: the same implementation succeeds for a regular file and fails for a
 pipe. Had `openkal.stream` offered positioning, this implementation could
 neither claim it honestly nor withhold it usefully.
 
-**The compiler is not permitted to require a C library.** The implementation is
-compiled without exceptions, without run-time type information and without the
-stack protector, and the flags are attached to this package's own sources rather
+**The compiler is not permitted to reach for a runtime the program may supply.**
+The implementation is compiled without exceptions, without run-time type
+information and without the stack protector, and the flags are attached to this package's own sources rather
 than to the whole build: a module interface records the dialect it was compiled
 under, so a translation unit compiled without exceptions cannot import one
 compiled with them, and the conformance tests are consumers rather than parts of
