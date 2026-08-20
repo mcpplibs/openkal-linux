@@ -6,17 +6,17 @@
 // Execution contexts come from one of two places, and which one is a property
 // of the program rather than of this implementation.
 //
-// A program linked against a C library already has that library's threads, and
-// a context obtained from them may call anything the program can call. This is
-// the ordinary configuration and it is the default.
+// A program that already carries a runtime has that runtime's threads, and a
+// context obtained from them may call anything the program can call. This is
+// the ordinary arrangement and it is the default.
 //
-// A program that *is* a C library --- one being ported onto openkal --- has no
-// other library to obtain threads from, and this implementation creates them
-// itself. The feature named `freestanding' selects that. It is not an
-// optimisation: in that configuration there is no C library beneath this
-// implementation to call, so the choice is between creating contexts here and
-// not providing openkal.task at all.
-#ifdef OKL_FREESTANDING
+// A program that carries no such runtime --- because it supplies one itself, or
+// because it has none --- has nothing to obtain threads from, and this
+// implementation creates them. The feature named `standalone' selects that. It
+// is not an optimisation: in that arrangement the choice is between creating
+// contexts here and not providing openkal.task at all.
+
+#ifdef OKL_STANDALONE
 
 // The child of a clone begins on a stack of its own with no return address, so
 // the transfer cannot be written in C. The sequence is the one every C library
@@ -98,12 +98,12 @@ struct context {
     okl_uptr stack_bytes;
     okl::tls_block tls;
     volatile int tid;      // the kernel clears this when the context ends
-#ifndef OKL_FREESTANDING
+#ifndef OKL_STANDALONE
     unsigned long thread;
 #endif
 };
 
-#ifdef OKL_FREESTANDING
+#ifdef OKL_STANDALONE
 
 void* alloc_bridge(okl_uptr n, okl_uptr a) { return kal_alloc(n, a); }
 
@@ -144,7 +144,7 @@ int kal_task_start(void (*entry)(void*), void* arg, kal_task* out) {
     okl::fill(c, 0, sizeof(context));
     c->entry = entry; c->arg = arg;
 
-#ifdef OKL_FREESTANDING
+#ifdef OKL_STANDALONE
     c->stack_bytes = kStack;
     c->stack = kal_alloc(kStack, 16);
     c->tls   = okl::make_tls(alloc_bridge);
@@ -191,7 +191,7 @@ int kal_task_start(void (*entry)(void*), void* arg, kal_task* out) {
 int kal_task_join(kal_task h) {
     auto* c = reinterpret_cast<context*>(h.h);
     if (c == nullptr) return kal_err_invalid;
-#ifdef OKL_FREESTANDING
+#ifdef OKL_STANDALONE
     // The kernel clears the word and wakes those suspended upon it after the
     // context has left user space, so releasing its stack afterwards is safe:
     // nothing in it can still be executing.

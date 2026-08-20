@@ -38,16 +38,19 @@ flags = [
 [features]
 default = []
 
-# A program that has no C library of its own.
+# Whether this implementation is the whole of the program's environment.
 #
-# In that configuration this implementation supplies what a C library's first
-# object ordinarily supplies --- the program entry, the thread pointer, and the
-# creation of execution contexts --- because there is nothing else in the
-# program that can. It is not a faster or smaller variant of the default: the
-# default obtains its execution contexts from the C library the program is
-# linked against, and a program that is a C library has none to obtain them
-# from.
+# openkal says nothing about what else a program contains, and there are two
+# arrangements. Ordinarily a program already carries a runtime of its own, that
+# runtime has already received control from the environment and already creates
+# execution contexts, and this implementation borrows both. That is the default.
 #
-# A consumer does not ordinarily request this. openkal-musl requests it,
-# because a C library is the consumer it describes.
-freestanding = { defines = ["OKL_FREESTANDING"] }
+# Sometimes there is no such runtime --- because the program supplies one
+# itself, or because it has none. Then nothing in the program has received
+# control and nothing creates contexts, and this implementation does both. That
+# is what `standalone' selects.
+#
+# It is a statement about the program, not a smaller or faster variant of the
+# implementation, and the consumer that knows which arrangement holds is the
+# one that declares it.
+standalone = { defines = ["OKL_STANDALONE"] }

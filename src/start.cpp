@@ -1,25 +1,24 @@
-// Program startup, for a program linked without a C library.
+// Program startup, for a program that carries no runtime of its own.
 //
-// Something must receive control from the kernel, find the arguments the
-// kernel left on the stack, establish the thread pointer, and call the
-// program. On a hosted system that something is the C library's first object,
-// and this file is not compiled: the definition below is reached only when the
-// linker has an undefined `_start' to satisfy, which happens exactly when no
-// other object provides one.
+// Something must receive control from the kernel, find the arguments the kernel
+// left on the stack, establish the thread pointer, and call the program. Where
+// a program already carries a runtime, that runtime's first object does it and
+// this file is not reached: the definition below is used only when the linker
+// has an undefined `_start' to satisfy, which happens exactly when no other
+// object provides one.
 //
-// It belongs here rather than in the C library above, and the reason is
-// visible in what it does. Every step is a fact about this kernel --- the
-// layout of the stack at inception, the program headers the kernel reports,
-// the instruction that sets the thread pointer. A C library ported onto
-// openkal that contained these steps would contain a copy of them for every
-// environment, which is what porting it onto openkal was meant to remove.
+// It belongs to the implementation rather than to whatever sits above, and the
+// reason is visible in what it does. Every step is a fact about this kernel ---
+// the layout of the stack at inception, the program headers the kernel reports,
+// the instruction that sets the thread pointer. A consumer that contained these
+// steps would contain a copy of them per environment, which is what depending
+// on openkal was meant to remove.
 //
-// Control is handed to the C library through `__libc_start_main', which is the
-// name every C library already uses for this hand-over. The symbol is weak: a
-// program with no C library at all --- one written directly against openkal ---
-// links without it, and then this file runs the initialisers and calls `main'
-// itself.
-#ifdef OKL_FREESTANDING
+// Control is handed on through `__libc_start_main', which is the name the
+// arrangement already has a name for. The symbol is weak: a program written
+// directly against openkal has none, and then this file runs the initialisers
+// and calls `main' itself.
+#ifdef OKL_STANDALONE
 
 #include "sys.h"
 #include "tls.h"
@@ -119,4 +118,4 @@ extern "C" [[noreturn]] void __okl_start_c(long* sp) {
     kal_exit(main(argc, argv, envp));
 }
 
-#endif  // OKL_FREESTANDING
+#endif  // OKL_STANDALONE

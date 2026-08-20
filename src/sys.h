@@ -1,29 +1,33 @@
 // The system call interface of the Linux kernel, and nothing else.
 //
-// Version 0.4 of this implementation was written upon the C library of the
-// host. That is a correct implementation of openkal and it is not a correct
-// implementation for every program above openkal, for a reason that appears
-// only when the program above is itself a C library.
+// openkal is a contract and says nothing about what else a program contains.
+// That silence is the reason for this file.
 //
-// A C library ported onto openkal defines `write', `malloc' and `open'. So
-// does the host's. Two definitions of one name cannot both be reached from one
-// program, so an implementation that calls the host's calls the ported one
-// instead --- and the ported one calls openkal, which calls the implementation,
-// which calls it again. The recursion is unbounded and it is not detectable by
-// reading either side.
+// An implementation is selected by the program, and the program may itself
+// supply the facilities the implementation would otherwise borrow. If it does,
+// and the names agree, there is one definition of each name in the program:
+// the implementation's calls resolve to the program's, and the program's
+// resolve back to the implementation. The recursion is unbounded and it is not
+// visible in either side's source.
 //
-// The remedy is not a linking arrangement. It is that an implementation which
-// sits beneath a C library must not depend upon one: this file therefore
-// contains the kernel's calling convention and this implementation contains no
-// reference to any C library symbol. The property is asserted by CI, which
-// examines the undefined symbols of the produced objects.
+// Version 0.4 of this implementation borrowed the host's C library. That is a
+// correct implementation of openkal for a program that borrows nothing, and it
+// is wrong for a program that supplies its own --- which the specification
+// permits and clause 1 names first among the consumers it expects. The
+// specification says an implementation may be built upon a C library, beneath
+// one, or without one; only an implementation that borrows nothing can be the
+// second and third.
+//
+// This implementation therefore contains the kernel's calling convention and no
+// reference to a facility any program might also define. The property is
+// asserted by CI, which examines the undefined symbols of the produced objects.
 //
 // A second consequence is less obvious and equally binding. A structure passed
 // to the kernel has the kernel's layout, which is not the layout of the
-// same-named structure in any particular C library: musl's `struct stat' and
-// glibc's differ, and an implementation compiled against one and linked with
-// the other would read the wrong fields. The kernel's own layouts are
-// therefore declared here.
+// same-named structure in any particular runtime: two C libraries' `struct
+// stat' differ, and an implementation compiled against one and linked into a
+// program carrying the other would read the wrong fields. The kernel's own
+// layouts are therefore declared here.
 #pragma once
 
 using okl_long  = long;
