@@ -1,5 +1,23 @@
 name: CI
 
+# What this workflow asserts.
+#
+#   conformance   the suite in the specification package runs against this
+#                 implementation and every observation holds
+#   additions     this package's own tests, which examine the operations
+#                 version 0.5 added
+#   surface       the exported names are exactly the fifty-one the
+#                 specification lists, in both forms
+#   independence  the objects reference no C library symbol
+#
+# The last is the property version 0.5 exists for, and it is asserted against
+# the objects rather than against the source, because a source can reach a C
+# library through a macro.
+#
+# Two compiler families, because an implementation is a contract's evidence and
+# a contract that holds only under the compiler its author used is a description
+# of that compiler.
+
 on:
   push:
     branches: [main]
@@ -13,20 +31,29 @@ env:
 
 jobs:
   conformance:
-    name: conformance, surface, and independence from a C library
+    name: conformance, surface, and independence (${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['gcc@16.1.0', 'llvm@22.1.8']
     steps:
       - uses: actions/checkout@v4
 
-      # The specification is checked out at its own head rather than named by
-      # version, so that this run asserts what it is for: that the
-      # specification as written there and this implementation as written here
-      # agree today.
-      - uses: actions/checkout@v4
-        with:
-          repository: mcpplibs/openkal
-          path: .spec
+      # The specification is checked out at the branch under test where it has
+      # one, so that this run asserts what it is for: that the specification as
+      # written there and this implementation as written here agree today.
+      - name: The specification
+        run: |
+          git clone --quiet https://github.com/mcpplibs/openkal.git .spec
+          branch='${{ github.head_ref || github.ref_name }}'
+          if git -C .spec rev-parse --verify --quiet "origin/$branch" > /dev/null; then
+            git -C .spec checkout --quiet "origin/$branch"
+            echo "the specification is at $branch"
+          else
+            echo "the specification has no $branch; its default branch is used"
+          fi
 
       - name: Install xlings
         run: |
@@ -41,10 +68,32 @@ jobs:
           mcpp --version
           mcpp self config --mirror GLOBAL
 
-      - name: Point at the specification's working tree
-        run: sed -i 's|^openkal = ".*"$|openkal = { path = ".spec" }|' mcpp.toml
+      # The compiler family and version for this row. mcpp keeps its toolchains
+      # in a sandbox of its own, so this selects rather than installs into the
+      # system, and `mcpp test' and `mcpp run' have no flag for it --- which is
+      # why it is set once here rather than passed to each command.
+      - name: Select the toolchain
+        run: |
+          spec='${{ matrix.toolchain }}'
+          case "$spec" in
+            msvc*) mcpp toolchain default msvc ;;
+            *)     mcpp toolchain install "${spec%@*}" "${spec#*@}"
+                   mcpp toolchain default "$spec" ;;
+          esac
+          mcpp toolchain list
 
-      - name: Conformance
+      - name: Every interface, every kind of examination
+        run: |
+          bash .spec/tools/run-conformance.sh openkal-linux . full
+
+      - name: Point at the specification's working tree
+        run: |
+          # run-conformance.sh has already done this; it is repeated because a
+          # reader of this file should not have to know that.
+          sed 's|^openkal = .*$|openkal = { path = ".spec" }|' mcpp.toml > mcpp.toml.next
+          mv mcpp.toml.next mcpp.toml
+
+      - name: This package's own tests
         run: |
           mcpp test 2>&1 | tee tests.log
           # A suite that discovered nothing reports success, so every suite is
@@ -85,19 +134,17 @@ jobs:
           grep -q '^conformance_declarations \.\.\. ok' decl.log
           rm -f tests/conformance_declarations.cpp
 
-      # The property this version exists for. An implementation that sits
-      # beneath a C library must not depend upon one, or its calls resolve to
-      # the library above it and recur without bound. The assertion is made
-      # against the objects rather than against the source, because a source
-      # can call a C library through a macro.
+      # The property this version exists for. An implementation beneath a
+      # program that supplies its own runtime must not reach for that runtime's
+      # names, or its calls resolve to the program's and recur without bound.
       - name: The objects reference no C library symbol
         run: |
-          rm -rf target && mcpp build --features freestanding
+          rm -rf target && mcpp build --features standalone
           objs=$(find target -path '*/obj/*' -name '*.o' ! -name '*.m.o' ! -name 'conformance*')
           test -n "$objs" || { echo "no objects were found; the check would pass vacuously" >&2; exit 1; }
 
           # The permitted set. memcpy, memmove, memset and memcmp are the four a
-          # freestanding implementation is permitted to require: a compiler
+          # freestanding translation unit is permitted to require: a compiler
           # emits calls to them from ordinary loops, and they compute rather
           # than call, so none of them can re-enter this implementation.
           # __libc_start_main and main are the hand-over, and are undefined here
@@ -118,7 +165,7 @@ jobs:
       - name: The independence check detects a dependence
         run: |
           printf 'extern "C" int puts(const char*);\nextern "C" void okl_probe(void) { puts("x"); }\n' > src/probe.cpp
-          rm -rf target && mcpp build --features freestanding
+          rm -rf target && mcpp build --features standalone
           objs=$(find target -path '*/obj/*' -name '*.o' ! -name '*.m.o')
           if ! nm --undefined-only $objs | awk '{print $2}' | grep -qx puts; then
             echo "the probe did not produce the reference it was written to produce" >&2
