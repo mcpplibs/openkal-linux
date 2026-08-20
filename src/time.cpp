@@ -1,43 +1,53 @@
-#include <time.h>
-#include <errno.h>
-import openkal.time;
+#include "sys.h"
+#include <openkal/time.h>
+
+namespace {
+kal_duration nanoseconds(const okl::ktimespec& t) {
+    return static_cast<kal_duration>(t.sec) * 1000000000u
+         + static_cast<kal_duration>(t.nsec);
+}
+}  // namespace
 
 extern "C" {
 
 kal_duration kal_time_monotonic(void) {
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return static_cast<kal_duration>(ts.tv_sec) * 1000000000u
-         + static_cast<kal_duration>(ts.tv_nsec);
+    okl::ktimespec t{};
+    okl::sys(okl::nr_clock_gettime, okl::clock_monotonic, reinterpret_cast<okl_long>(&t));
+    return nanoseconds(t);
 }
 
 kal_duration kal_time_wall(void) {
-    timespec ts{};
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return static_cast<kal_duration>(ts.tv_sec) * 1000000000u
-         + static_cast<kal_duration>(ts.tv_nsec);
+    okl::ktimespec t{};
+    okl::sys(okl::nr_clock_gettime, okl::clock_realtime, reinterpret_cast<okl_long>(&t));
+    return nanoseconds(t);
 }
 
 kal_duration kal_time_monotonic_granularity(void) {
-    timespec ts{};
-    if (clock_getres(CLOCK_MONOTONIC, &ts) != 0) return 1;
-    const auto ns = static_cast<kal_duration>(ts.tv_sec) * 1000000000u
-                  + static_cast<kal_duration>(ts.tv_nsec);
+    okl::ktimespec t{};
+    if (okl::failed(okl::sys(okl::nr_clock_getres, okl::clock_monotonic,
+                             reinterpret_cast<okl_long>(&t)))) return 1;
+    const kal_duration ns = nanoseconds(t);
     return ns == 0 ? 1 : ns;
 }
 
 void kal_time_sleep(kal_duration ns) {
-    timespec req{ static_cast<time_t>(ns / 1000000000u),
-                  static_cast<long>(ns % 1000000000u) };
+    okl::ktimespec req{ static_cast<okl_i64>(ns / 1000000000u),
+                        static_cast<okl_i64>(ns % 1000000000u) };
     // The specification requires that the call not return early, so an
-    // interruption resumes the remainder rather than reporting it.
-    while (nanosleep(&req, &req) != 0 && errno == EINTR) { }
+    // interruption resumes the remainder rather than reporting it. The kernel
+    // writes what is left into the same structure, which is why it is not
+    // const.
+    for (;;) {
+        const okl_long r = okl::sys(okl::nr_nanosleep, reinterpret_cast<okl_long>(&req),
+                                    reinterpret_cast<okl_long>(&req));
+        if (!okl::interrupted(r)) return;
+    }
 }
 
-// CLOCK_MONOTONIC on this system does not advance while the machine is
+// The monotonic clock of this kernel does not advance while the machine is
 // suspended, which the corresponding property records.
 const kal_uintptr kal_time_props =
-    kal::time::prop_wall_available | kal::time::prop_monotonic_suspends
-  | kal::time::prop_sleep_precise;
+    KAL_TIME_PROP_WALL_AVAILABLE | KAL_TIME_PROP_MONOTONIC_SUSPENDS
+  | KAL_TIME_PROP_SLEEP_PRECISE;
 
 }

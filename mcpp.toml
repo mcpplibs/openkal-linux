@@ -1,15 +1,56 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-linux"
-version     = "0.4.0"
-description = "The reference implementation of openkal for Linux. It is both a usable backend and the worked example other implementations follow."
+version     = "0.5.0"
+description = "The reference implementation of openkal for Linux, written on the kernel's own system-call interface so that it can be placed beneath a C library as well as above one."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
 repo        = "https://github.com/mcpplibs/openkal-linux"
 
 [dependencies]
-openkal = "0.4.0"
+openkal = "0.5.0"
 
 # The package contributes definitions and no modules. The interface it
 # implements is declared by the specification package, which this package
 # imports and does not re-export.
+
+[build]
+# No exception may propagate out of a C entry point, and no C library is
+# available to unwind through in the configuration this implementation is
+# written for. Neither facility is used, so neither is emitted.
+#
+# The stack protector is disabled for the same reason it is disabled in every
+# C library's own lowest layer: the check reads a value from thread-local
+# storage that this implementation is itself responsible for establishing, so
+# a function that runs before that point cannot perform it.
+#
+# The flags are attached to this package's own sources rather than to the whole
+# build. A module interface records the dialect it was compiled under, so a
+# translation unit compiled without exceptions cannot import one compiled with
+# them; the conformance tests import the specification's modules, and they are
+# consumers rather than parts of the implementation.
+flags = [
+  { glob = "src/**", cxxflags = ["-fno-exceptions", "-fno-rtti",
+                                 "-fno-stack-protector",
+                                 "-fno-asynchronous-unwind-tables"] },
+]
+
+[features]
+default = []
+
+# Whether this implementation is the whole of the program's environment.
+#
+# openkal says nothing about what else a program contains, and there are two
+# arrangements. Ordinarily a program already carries a runtime of its own, that
+# runtime has already received control from the environment and already creates
+# execution contexts, and this implementation borrows both. That is the default.
+#
+# Sometimes there is no such runtime --- because the program supplies one
+# itself, or because it has none. Then nothing in the program has received
+# control and nothing creates contexts, and this implementation does both. That
+# is what `standalone' selects.
+#
+# It is a statement about the program, not a smaller or faster variant of the
+# implementation, and the consumer that knows which arrangement holds is the
+# one that declares it.
+standalone = { defines = ["OKL_STANDALONE"] }

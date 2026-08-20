@@ -40,7 +40,7 @@ int main() {
     const char payload[] = "conformance";
     check(kal::write(s, payload, sizeof(payload) - 1).e == kal_ok, "the file is written");
 
-    __UINT64_TYPE__ pos = 0;
+    kal_u64 pos = 0;
     check(kal_fs_seek(f, 0, kal::fs::seek_set, &pos) == kal_ok && pos == 0,
           "the file is repositioned");
     char back[32] = {};

@@ -1,88 +1,87 @@
-#include <stdio.h>      // renameat
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <dirent.h>
-#include <errno.h>
-#include <stdlib.h>
+#include "sys.h"
 #include "handle.h"
-import openkal.fs;
-import openkal.types;
+#include <openkal/fs.h>
+#include <openkal/memory.h>
 
 namespace {
 
-int translate(int e) {
-    switch (e) {
-        case EBADF: case EINVAL: case EFAULT: case ENOENT: case ENOTDIR: return kal_err_invalid;
-        case EAGAIN:                                     return kal_err_again;
-        case ENOMEM:                                     return kal_err_no_memory;
-        case ENOSPC: case EFBIG: case EDQUOT:            return kal_err_no_space;
-        case EACCES: case EPERM: case EROFS:             return kal_err_permission;
-        case ENOSYS: case ENOTSUP:                       return kal_err_not_supported;
-        default:                                         return kal_err_io;
+
+// The directories this implementation supplies. A hosted system does not
+// confine an ordinary program, so it supplies both the working directory and
+// the whole file system; an implementation that confined a program would
+// supply fewer, and the program could not tell the difference except by
+// finding that a directory it wanted was absent.
+//
+// The working directory is reported under the name the environment knows it
+// by, which is its absolute path rather than ".". A C library above openkal
+// must both resolve an absolute path and report one, and a name of "." leaves
+// it able to do only the first.
+struct preopen { const char* name; kal_uintptr len; okl_uptr handle; };
+
+char g_cwd[4096];
+
+preopen* table(kal_uintptr* count) {
+    static preopen t[2];
+    static bool opened = false;
+    if (!opened) {
+        opened = true;
+
+        const okl_long n = okl::sys(okl::nr_getcwd, reinterpret_cast<okl_long>(g_cwd),
+                                    static_cast<okl_long>(sizeof g_cwd));
+        // getcwd reports the length including the terminator, and reports a
+        // failure when the directory has been removed. A program whose working
+        // directory no longer has a name still has the directory, so the
+        // handle is opened either way and only the name falls back.
+        okl_uptr cwd_len = 0;
+        if (!okl::failed(n) && n > 1) cwd_len = static_cast<okl_uptr>(n) - 1;
+        else { g_cwd[0] = '.'; g_cwd[1] = '\0'; cwd_len = 1; }
+
+        const okl_long fd0 = okl::sys(okl::nr_openat, okl::at_fdcwd,
+                                      reinterpret_cast<okl_long>("."),
+                                      okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+        const okl_long fd1 = okl::sys(okl::nr_openat, okl::at_fdcwd,
+                                      reinterpret_cast<okl_long>("/"),
+                                      okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+        t[0] = { g_cwd, cwd_len, okl::failed(fd0) ? 0u : okl::pack(static_cast<int>(fd0)) };
+        t[1] = { "/",   1,       okl::failed(fd1) ? 0u : okl::pack(static_cast<int>(fd1)) };
+    }
+    if (count) *count = 2;
+    return t;
+}
+
+int kind_of(okl_u32 mode) {
+    switch (mode & okl::s_ifmt) {
+        case okl::s_ifreg: return kal_node_file;
+        case okl::s_ifdir: return kal_node_directory;
+        case okl::s_iflnk: return kal_node_link;
+        default:           return kal_node_other;
     }
 }
 
-// A name is a single component or a sequence separated by a forward slash. It
-// shall not begin with a separator and shall not contain a component that
-// ascends: a program able to ascend from the directory it was given would not
-// be confined by having been given it.
-bool acceptable(const char* name, kal_uintptr len) {
-    if (len == 0 || name[0] == '/') return false;
-    kal_uintptr start = 0;
-    for (kal_uintptr i = 0; i <= len; ++i) {
-        if (i == len || name[i] == '/') {
-            const kal_uintptr n = i - start;
-            if (n == 0) return false;
-            if (n == 2 && name[start] == '.' && name[start + 1] == '.') return false;
-            start = i + 1;
-        }
-    }
-    return true;
+void fill_info(const okl::kstat& st, kal_node_info* out) {
+    *out = kal_node_info{
+        static_cast<kal_uintptr>(st.size),
+        static_cast<kal_u64>(st.mtime_sec) * 1000000000u
+            + static_cast<kal_u64>(st.mtime_nsec),
+        kind_of(st.mode),
+        (st.mode & 0200u) != 0 ? 1 : 0,
+    };
 }
 
-// The operations take a counted name; the system calls take a terminated one.
-// A bounded copy is the whole of the adaptation, and it is not a compatibility
-// layer: it converts a representation and reconstructs no namespace.
-struct terminated {
-    char  buf[4096];
-    bool  ok;
-    terminated(const char* s, kal_uintptr n) : ok(n < sizeof(buf)) {
-        if (ok) { for (kal_uintptr i = 0; i < n; ++i) buf[i] = s[i]; buf[n] = '\0'; }
-    }
+// Enumeration reads the kernel's own directory records. A C library's
+// directory stream is not used, for the reason src/sys.h gives: the C library
+// in a program above this one may be the one this implementation would be
+// calling.
+struct listing {
+    int      fd;
+    okl_uptr used;
+    okl_uptr pos;
+    char     buf[8192];
 };
 
 }  // namespace
 
 extern "C" {
-
-// The directories this implementation supplies. A hosted system does not
-// confine an ordinary program, so it supplies both the working directory and
-// the whole file system; an implementation that confined a program would supply
-// fewer, and the program would not be able to tell the difference except by
-// finding that a directory it wanted was absent.
-namespace {
-
-struct preopen { const char* name; kal_uintptr len; const char* path; uintptr_t handle; };
-
-preopen* table(kal_uintptr* count) {
-    static preopen t[] = {
-        { ".", 1, ".", 0 },
-        { "/", 1, "/", 0 },
-    };
-    static bool opened = false;
-    if (!opened) {
-        for (auto& e : t) {
-            const int fd = ::open(e.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            e.handle = okl::pack(fd);
-        }
-        opened = true;
-    }
-    if (count) *count = sizeof(t) / sizeof(t[0]);
-    return t;
-}
-
-}  // namespace
 
 kal_uintptr kal_fs_preopen_count(void) {
     kal_uintptr n = 0; table(&n); return n;
@@ -101,29 +100,56 @@ int kal_fs_preopen(kal_uintptr index, kal_dir* out, const char** name, kal_uintp
 
 int kal_fs_open_dir(kal_dir base, const char* name, kal_uintptr len, kal_dir* out) {
     const int b = okl::unpack(base.h);
-    if (b < 0 || !acceptable(name, len)) return kal_err_invalid;
-    terminated t(name, len); if (!t.ok) return kal_err_invalid;
-    const int fd = ::openat(b, t.buf, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return translate(errno);
-    *out = kal_dir{ okl::pack(fd) };
+    if (b < 0 || out == nullptr || !okl::acceptable(name, len)) return kal_err_invalid;
+    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf),
+                                 okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+    if (okl::failed(fd)) return okl::translate(fd);
+    *out = kal_dir{ okl::pack(static_cast<int>(fd)) };
     return kal_ok;
 }
 
+int kal_fs_open(kal_dir base, const char* name, kal_uintptr len,
+                kal_uintptr flags, kal_file* out) {
+    const int b = okl::unpack(base.h);
+    if (b < 0 || out == nullptr || !okl::acceptable(name, len)) return kal_err_invalid;
+    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+
+    const bool r = (flags & KAL_OPEN_READ)  != 0;
+    const bool w = (flags & KAL_OPEN_WRITE) != 0;
+    okl_long f = w ? (r ? okl::o_rdwr : okl::o_wronly) : okl::o_rdonly;
+    f |= okl::o_cloexec;
+    if (flags & KAL_OPEN_CREATE)    f |= okl::o_creat;
+    if (flags & KAL_OPEN_EXCLUSIVE) f |= okl::o_excl;
+    if (flags & KAL_OPEN_TRUNCATE)  f |= okl::o_trunc;
+    if (flags & KAL_OPEN_APPEND)    f |= okl::o_append;
+
+    const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf), f, 0666);
+    if (okl::failed(fd)) return okl::translate(fd);
+    *out = kal_file{ okl::pack(static_cast<int>(fd)) };
+    return kal_ok;
+}
+
+// The form the earlier version specified, defined in terms of the one above,
+// which is what the specification records that an implementation ordinarily
+// does.
 int kal_fs_open_file(kal_dir base, const char* name, kal_uintptr len,
                      int write, int create, kal_file* out) {
-    const int b = okl::unpack(base.h);
-    if (b < 0 || !acceptable(name, len)) return kal_err_invalid;
-    terminated t(name, len); if (!t.ok) return kal_err_invalid;
-    int flags = (write ? O_RDWR : O_RDONLY) | O_CLOEXEC;
-    if (create) flags |= O_CREAT | O_TRUNC;
-    const int fd = ::openat(b, t.buf, flags, 0666);
-    if (fd < 0) return translate(errno);
-    *out = kal_file{ okl::pack(fd) };
-    return kal_ok;
+    kal_uintptr flags = KAL_OPEN_READ;
+    if (write)  flags |= KAL_OPEN_WRITE;
+    if (create) flags |= KAL_OPEN_WRITE | KAL_OPEN_CREATE | KAL_OPEN_TRUNCATE;
+    return kal_fs_open(base, name, len, flags, out);
 }
 
-void kal_fs_close_dir (kal_dir d)  { const int fd = okl::unpack(d.h); if (fd >= 0) { okl::retire(d.h); ::close(fd); } }
-void kal_fs_close_file(kal_file f) { const int fd = okl::unpack(f.h); if (fd >= 0) { okl::retire(f.h); ::close(fd); } }
+void kal_fs_close_dir(kal_dir d) {
+    const int fd = okl::unpack(d.h);
+    if (fd >= 0) { okl::retire(d.h); okl::sys(okl::nr_close, fd); }
+}
+
+void kal_fs_close_file(kal_file f) {
+    const int fd = okl::unpack(f.h);
+    if (fd >= 0) { okl::retire(f.h); okl::sys(okl::nr_close, fd); }
+}
 
 // A file's stream is the file. The descriptor is what openkal.stream's handle
 // holds on this implementation, so no conversion is required and none is
@@ -134,78 +160,124 @@ kal_uintptr kal_fs_stream(kal_file f) {
     return fd < 0 ? 0u : static_cast<kal_uintptr>(fd);
 }
 
-int kal_fs_seek(kal_file f, __INT64_TYPE__ offset, int whence, __UINT64_TYPE__* result) {
+int kal_fs_seek(kal_file f, kal_i64 offset, int whence, kal_u64* result) {
     const int fd = okl::unpack(f.h);
     if (fd < 0) return kal_err_invalid;
-    int w = SEEK_SET;
-    if (whence == kal::fs::seek_current) w = SEEK_CUR;
-    else if (whence == kal::fs::seek_end) w = SEEK_END;
-    const off_t r = ::lseek(fd, static_cast<off_t>(offset), w);
-    if (r < 0) return translate(errno);
-    if (result) *result = static_cast<__UINT64_TYPE__>(r);
+    int w = 0;
+    if (whence == KAL_SEEK_CURRENT) w = 1;
+    else if (whence == KAL_SEEK_END) w = 2;
+    const okl_long r = okl::sys(okl::nr_lseek, fd, static_cast<okl_long>(offset), w);
+    if (okl::failed(r)) return okl::translate(r);
+    if (result) *result = static_cast<kal_u64>(r);
     return kal_ok;
+}
+
+int kal_fs_truncate(kal_file f, kal_u64 size) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0) return kal_err_invalid;
+    const okl_long r = okl::sys(okl::nr_ftruncate, fd, static_cast<okl_long>(size));
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
 int kal_fs_info(kal_dir base, const char* name, kal_uintptr len, kal_node_info* out) {
     const int b = okl::unpack(base.h);
-    if (b < 0 || !acceptable(name, len) || out == nullptr) return kal_err_invalid;
-    terminated t(name, len); if (!t.ok) return kal_err_invalid;
-    struct stat st{};
-    if (::fstatat(b, t.buf, &st, AT_SYMLINK_NOFOLLOW) != 0) {
-        if (errno == ENOENT) { *out = kal_node_info{ 0, 0, kal_node_absent, 0 }; return kal_ok; }
-        return translate(errno);
+    if (b < 0 || out == nullptr || !okl::acceptable(name, len)) return kal_err_invalid;
+    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    okl::kstat st{};
+    const okl_long r = okl::sys(okl::nr_newfstatat, b, reinterpret_cast<okl_long>(t.buf),
+                                reinterpret_cast<okl_long>(&st), okl::at_symlink_nofollow);
+    if (okl::failed(r)) {
+        // Clause 7.7: enquiry about a name that does not exist is answered,
+        // not refused. A component of the name that is not a directory is the
+        // same answer, because the name still refers to nothing.
+        if (r == -okl::e_noent || r == -okl::e_notdir) {
+            *out = kal_node_info{ 0, 0, kal_node_absent, 0 };
+            return kal_ok;
+        }
+        return okl::translate(r);
     }
-    int kind = kal_node_other;
-    if (S_ISREG(st.st_mode))       kind = kal_node_file;
-    else if (S_ISDIR(st.st_mode))  kind = kal_node_directory;
-    else if (S_ISLNK(st.st_mode))  kind = kal_node_link;
-    *out = kal_node_info{
-        static_cast<kal_uintptr>(st.st_size),
-        static_cast<__UINT64_TYPE__>(st.st_mtim.tv_sec) * 1000000000u
-            + static_cast<__UINT64_TYPE__>(st.st_mtim.tv_nsec),
-        kind,
-        (st.st_mode & S_IWUSR) != 0 ? 1 : 0,
-    };
+    fill_info(st, out);
     return kal_ok;
+}
+
+int kal_fs_file_info(kal_file f, kal_node_info* out) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0 || out == nullptr) return kal_err_invalid;
+    okl::kstat st{};
+    const okl_long r = okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&st));
+    if (okl::failed(r)) return okl::translate(r);
+    fill_info(st, out);
+    return kal_ok;
+}
+
+int kal_fs_set_modified(kal_file f, kal_u64 modified_ns) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0) return kal_err_invalid;
+    // The kernel's operation takes two times and this interface names one, so
+    // the other is given the value that means "leave it alone". Setting the
+    // access time to the value openkal did not ask about would be an effect the
+    // caller did not request and could not have predicted.
+    constexpr okl_i64 utime_omit = 0x3ffffffe;
+    okl::ktimespec times[2];
+    times[0].sec = 0;  times[0].nsec = utime_omit;
+    times[1].sec = static_cast<okl_i64>(modified_ns / 1000000000u);
+    times[1].nsec = static_cast<okl_i64>(modified_ns % 1000000000u);
+    // A null name and a descriptor is this kernel's spelling of "the open file
+    // itself" rather than "a name beneath it".
+    const okl_long r = okl::sys(okl::nr_utimensat, fd, 0,
+                                reinterpret_cast<okl_long>(times), 0);
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
 int kal_fs_mkdir(kal_dir base, const char* name, kal_uintptr len) {
     const int b = okl::unpack(base.h);
-    if (b < 0 || !acceptable(name, len)) return kal_err_invalid;
-    terminated t(name, len); if (!t.ok) return kal_err_invalid;
-    return ::mkdirat(b, t.buf, 0777) == 0 ? kal_ok : translate(errno);
+    if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
+    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    const okl_long r = okl::sys(okl::nr_mkdirat, b, reinterpret_cast<okl_long>(t.buf), 0777);
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
 int kal_fs_remove(kal_dir base, const char* name, kal_uintptr len) {
     const int b = okl::unpack(base.h);
-    if (b < 0 || !acceptable(name, len)) return kal_err_invalid;
-    terminated t(name, len); if (!t.ok) return kal_err_invalid;
-    if (::unlinkat(b, t.buf, 0) == 0) return kal_ok;
-    if (errno == EISDIR || errno == EPERM) {
-        if (::unlinkat(b, t.buf, AT_REMOVEDIR) == 0) return kal_ok;
+    if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
+    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    okl_long r = okl::sys(okl::nr_unlinkat, b, reinterpret_cast<okl_long>(t.buf), 0);
+    if (!okl::failed(r)) return kal_ok;
+    // One operation removes a name, and the kernel distinguishes two kinds of
+    // name where this interface does not.
+    if (r == -okl::e_isdir || r == -okl::e_perm) {
+        const okl_long d = okl::sys(okl::nr_unlinkat, b, reinterpret_cast<okl_long>(t.buf),
+                                    okl::at_removedir);
+        if (!okl::failed(d)) return kal_ok;
+        r = d;
     }
-    return translate(errno);
+    return okl::translate(r);
 }
 
 int kal_fs_rename(kal_dir from, const char* a, kal_uintptr alen,
                   kal_dir to,   const char* b, kal_uintptr blen) {
     const int f = okl::unpack(from.h), t2 = okl::unpack(to.h);
-    if (f < 0 || t2 < 0 || !acceptable(a, alen) || !acceptable(b, blen)) return kal_err_invalid;
-    terminated ta(a, alen), tb(b, blen);
+    if (f < 0 || t2 < 0 || !okl::acceptable(a, alen) || !okl::acceptable(b, blen)) return kal_err_invalid;
+    okl::terminated ta(a, alen), tb(b, blen);
     if (!ta.ok || !tb.ok) return kal_err_invalid;
-    return ::renameat(f, ta.buf, t2, tb.buf) == 0 ? kal_ok : translate(errno);
+    const okl_long r = okl::sys(okl::nr_renameat, f, reinterpret_cast<okl_long>(ta.buf),
+                                t2, reinterpret_cast<okl_long>(tb.buf));
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
-// Enumeration holds a directory stream. The iterator word carries its address,
-// which is the implementation's own and is never interpreted by a caller.
+// Enumeration holds a descriptor of its own, obtained by opening the directory
+// through itself. A duplicate would share the file offset with the handle the
+// caller holds, so two enumerations of one directory would consume each
+// other's entries.
 int kal_fs_list_begin(kal_dir d, kal_uintptr* iter) {
     const int fd = okl::unpack(d.h);
     if (fd < 0 || iter == nullptr) return kal_err_invalid;
-    const int dup = ::dup(fd);
-    if (dup < 0) return translate(errno);
-    DIR* s = ::fdopendir(dup);
-    if (s == nullptr) { ::close(dup); return translate(errno); }
-    ::rewinddir(s);
+    const okl_long own = okl::sys(okl::nr_openat, fd, reinterpret_cast<okl_long>("."),
+                                  okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+    if (okl::failed(own)) return okl::translate(own);
+    auto* s = static_cast<listing*>(kal_alloc(sizeof(listing), alignof(listing)));
+    if (s == nullptr) { okl::sys(okl::nr_close, own); return kal_err_no_memory; }
+    s->fd = static_cast<int>(own); s->used = 0; s->pos = 0;
     *iter = reinterpret_cast<kal_uintptr>(s);
     return kal_ok;
 }
@@ -213,32 +285,41 @@ int kal_fs_list_begin(kal_dir d, kal_uintptr* iter) {
 int kal_fs_list_next(kal_dir, kal_uintptr* iter, const char** name,
                      kal_uintptr* len, int* kind) {
     if (iter == nullptr || *iter == 0) return kal_err_invalid;
-    DIR* s = reinterpret_cast<DIR*>(*iter);
+    auto* s = reinterpret_cast<listing*>(*iter);
     for (;;) {
-        errno = 0;
-        dirent* e = ::readdir(s);
-        if (e == nullptr) {
-            ::closedir(s); *iter = 0;
-            if (name) *name = nullptr;
-            if (len)  *len = 0;
-            return errno == 0 ? kal_ok : translate(errno);
+        if (s->pos >= s->used) {
+            const okl_long r = okl::sys(okl::nr_getdents64, s->fd,
+                                        reinterpret_cast<okl_long>(s->buf),
+                                        static_cast<okl_long>(sizeof s->buf));
+            if (okl::interrupted(r)) continue;
+            if (okl::failed(r) || r == 0) {
+                okl::sys(okl::nr_close, s->fd);
+                kal_free(s, sizeof(listing), alignof(listing));
+                *iter = 0;
+                if (name) *name = nullptr;
+                if (len)  *len  = 0;
+                return okl::failed(r) ? okl::translate(r) : kal_ok;
+            }
+            s->used = static_cast<okl_uptr>(r);
+            s->pos  = 0;
         }
+        auto* e = reinterpret_cast<okl::kdirent64*>(s->buf + s->pos);
+        s->pos += e->reclen;
         // The two entries that name the directory and its parent are omitted.
         // They exist to support ascent, which this interface does not offer.
-        if (e->d_name[0] == '.' && (e->d_name[1] == '\0'
-            || (e->d_name[1] == '.' && e->d_name[2] == '\0'))) continue;
-        kal_uintptr n = 0; while (e->d_name[n] != '\0') ++n;
-        if (name) *name = e->d_name;
-        if (len)  *len  = n;
-        if (kind) *kind = e->d_type == DT_DIR ? kal_node_directory
-                        : e->d_type == DT_REG ? kal_node_file
-                        : e->d_type == DT_LNK ? kal_node_link : kal_node_other;
+        if (e->name[0] == '.' && (e->name[1] == '\0'
+            || (e->name[1] == '.' && e->name[2] == '\0'))) continue;
+        if (name) *name = e->name;
+        if (len)  *len  = okl::length(e->name);
+        if (kind) *kind = e->type == okl::dt_dir ? kal_node_directory
+                        : e->type == okl::dt_reg ? kal_node_file
+                        : e->type == okl::dt_lnk ? kal_node_link : kal_node_other;
         return kal_ok;
     }
 }
 
 const kal_uintptr kal_fs_props =
-    kal::fs::prop_case_sensitive | kal::fs::prop_modified_time
-  | kal::fs::prop_atomic_rename;
+    KAL_FS_PROP_CASE_SENSITIVE | KAL_FS_PROP_MODIFIED_TIME
+  | KAL_FS_PROP_ATOMIC_RENAME;
 
 }
