@@ -122,7 +122,21 @@ jobs:
           # fails to compile and the diagnostic names it.
           list="$(grep -vE '^[[:space:]]*(#|$)' .spec/SURFACE.txt | sort -u)"
           {
-            for m in types abort stream memory env time fs process task; do
+            # ⚠️ THE MODULE LIST IS DERIVED, NOT WRITTEN OUT.
+            #
+            # It used to be written out, and it fell out of step the first time
+            # the specification gained an interface: SURFACE.txt listed four
+            # `kal_exec_*' names, no `import openkal.exec' was emitted, and the
+            # generated test failed with four undeclared identifiers --- which
+            # names the symptom (a name is missing) and not the cause (a list
+            # here was not updated).
+            #
+            # SURFACE.txt groups its names under `# openkal.<interface>'
+            # headings, so the list it already carries is the list this needs.
+            # `types' is not a group there --- it declares no kal_ name --- and
+            # is therefore named separately.
+            echo "import openkal.types;"
+            for m in $(grep -oE '^# openkal\.[a-z]+' .spec/SURFACE.txt | cut -d. -f2); do
               echo "import openkal.$m;"
             done
             echo 'const void *const surface[] = {'
