@@ -197,7 +197,7 @@ enum : okl_long {
     o_creat = 0100, o_excl = 0200, o_trunc = 01000, o_append = 02000,
     o_directory = 0200000, o_cloexec = 02000000, o_nofollow = 0400000,
     at_fdcwd = -100, at_removedir = 0x200, at_symlink_nofollow = 0x100,
-    prot_read = 1, prot_write = 2, prot_none = 0,
+    prot_read = 1, prot_write = 2, prot_exec = 4, prot_none = 0,
     map_private = 2, map_anonymous = 0x20, map_stack = 0x20000,
     clock_monotonic = 1, clock_realtime = 0,
     futex_wait = 0, futex_wake = 1, futex_private = 128,
