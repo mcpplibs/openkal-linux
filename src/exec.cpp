@@ -44,8 +44,8 @@ int kal_exec_publish(void* p, kal_uintptr size) {
                                 okl::prot_read | okl::prot_exec);
     if (okl::failed(r)) return okl::translate(r);
 
-    // ⚠️⚠️ THE INSTRUCTION CACHE IS NOT INVALIDATED HERE, AND THE OTHER TWO
-    // IMPLEMENTATIONS DO INVALIDATE IT. THE ASYMMETRY IS DELIBERATE.
+    // ⚠️⚠️ THE INSTRUCTION CACHE IS NOT INVALIDATED HERE, AND ONE OF THE THREE
+    // IMPLEMENTATIONS DOES INVALIDATE IT. THE ASYMMETRY HAS A RULE.
     //
     // A processor with separate caches for data and instructions has just had
     // bytes written through the data path that it is about to fetch through the
@@ -58,20 +58,30 @@ int kal_exec_publish(void* p, kal_uintptr size) {
     // it is being helpful rather than conforming, and one that does not is not
     // deficient.
     //
-    // ⚠️ AND HERE IT WOULD COST SOMETHING THE OTHER TWO DO NOT PAY.
-    // `__builtin___clear_cache' expands to nothing on x86_64 and to a
-    // maintenance sequence on aarch64 --- and on riscv64 it becomes a CALL to
-    // `__riscv_flush_icache', which lives in the compiler's support library.
-    // This implementation sits beneath a C library and is linked into programs
-    // that carry no other runtime; acquiring a link-time dependency upon that
-    // library, on one architecture, to perform an operation the specification
-    // does not require of it, is a worse trade than the asymmetry.
+    // ⚠️ AND THE ONLY MEANS AVAILABLE HERE IS ONE THIS IMPLEMENTATION MAY NOT
+    // USE. `__builtin___clear_cache' expands to nothing on x86_64 and becomes a
+    // CALL into the compiler's support library on the other two architectures
+    // --- `__riscv_flush_icache' on riscv64. This implementation is linked into
+    // programs that carry no other runtime, so acquiring that dependency to
+    // perform an operation the specification does not require of it is not a
+    // trade worth making.
     //
-    // openkal-macos reaches both of its architectures with the builtin alone
-    // and openkal-windows has a system call for it, so neither pays that price
-    // and both do it. The three agree about what the PROGRAM must do; they
-    // differ in whether the implementation does it as well, which no program
-    // that follows the specification can observe.
+    // ⭐⭐ MEASURED, AND NOT ON THIS SYSTEM. openkal-macos added the builtin on
+    // the reading that aarch64 would expand it inline, and its own independence
+    // check reported within the hour:
+    //
+    //     obj/exec.o references a symbol it must not: ___clear_cache
+    //
+    // ⇒ The three implementations share a rule rather than an accident:
+    //
+    //     an implementation performs the maintenance where its environment
+    //     offers it as a CALL of the environment's own --- openkal-windows has
+    //     `FlushInstructionCache' --- and does not where the only means is a
+    //     compiler builtin that becomes a dependency upon the compiler's
+    //     support library.
+    //
+    // All three agree about what the PROGRAM must do, which is what the
+    // specification actually states.
     return kal_ok;
 }
 
