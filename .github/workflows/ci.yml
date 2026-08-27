@@ -49,6 +49,31 @@ jobs:
       # The specification is checked out at the branch under test where it has
       # one, so that this run asserts what it is for: that the specification as
       # written there and this implementation as written here agree today.
+      # THE COMMITTED MANIFEST NAMES NO DIRECTORY OF ANYBODY'S MACHINE.
+      #
+      # Two scripts in the specification's repository rewrite this manifest to
+      # name a working tree --- run-conformance.sh and run-kit-tests.sh --- and
+      # both restore it through a trap. A trap does not fire when the process is
+      # killed, and a run by hand followed by `git add -A` then publishes a path
+      # that exists on one machine: a consumer resolving from the index is handed
+      # a manifest pointing at a directory that exists nowhere.
+      #
+      # ⚠️ THAT HAS HAPPENED IN THIS ECOSYSTEM, in openkal-musl, and the working
+      # tree here has carried the same rewrite more than once since. This step
+      # runs first, so what it examines is what the commit contains.
+      - name: The committed manifest names no local directory
+        run: |
+          set -euo pipefail
+          bad=$(grep -nE '^[a-z-]+ = \{[^}]*path = "(/|[A-Za-z]:)' mcpp.toml || true)
+          if [ -n "$bad" ]; then
+            echo "::error::the committed manifest names an absolute path"
+            printf '%s\n' "$bad" | sed 's/^/        /'
+            echo "        run 'git checkout -- mcpp.toml' after using the"
+            echo "        specification's conformance or kit scripts by hand."
+            exit 1
+          fi
+          echo "  ok  every dependency is named by version, branch or a relative path"
+
       - name: The specification
         run: |
           git clone --quiet https://github.com/mcpplibs/openkal.git .spec
