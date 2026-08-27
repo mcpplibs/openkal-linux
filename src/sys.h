@@ -98,6 +98,15 @@ enum : okl_long {
     nr_renameat = 264, nr_readlinkat = 267, nr_dup3 = 292, nr_execveat = 322,
     nr_dup2 = 33, nr_utimensat = 280,
     nr_getrandom = 318,
+    // openkal.net and openkal.datagram
+    nr_socket = 41, nr_connect = 42, nr_accept = 43, nr_sendto = 44,
+    nr_recvfrom = 45, nr_shutdown = 48, nr_bind = 49, nr_listen = 50,
+    nr_getsockname = 51, nr_getpeername = 52, nr_accept4 = 288,
+    nr_setsockopt = 54,
+    // openkal.timeout. ppoll and not poll: the bound is stated in nanoseconds
+    // and poll takes milliseconds, so poll could not express a bound finer than
+    // the granularity this implementation reports.
+    nr_ppoll = 271,
 };
 
 #elif defined(__aarch64__)
@@ -172,6 +181,14 @@ enum : okl_long {
     nr_dup3 = 24, nr_execveat = 281, nr_dup2 = -1,
     nr_arch_prctl = -1, nr_utimensat = 88,
     nr_getrandom = 278,
+    // openkal.net and openkal.datagram
+    nr_socket = 198, nr_connect = 203, nr_accept = 202, nr_sendto = 206,
+    nr_recvfrom = 207, nr_shutdown = 210, nr_bind = 200, nr_listen = 201,
+    nr_getsockname = 204, nr_getpeername = 205, nr_accept4 = 242,
+    nr_setsockopt = 208,
+    // openkal.timeout. This architecture has no `poll' at all, only `ppoll',
+    // which is a second reason the bound is expressed through the latter.
+    nr_ppoll = 73,
 };
 
 #else
@@ -289,6 +306,79 @@ struct kdirent64 {
 };
 
 enum : unsigned char { dt_dir = 4, dt_reg = 8, dt_lnk = 10 };
+
+// --- openkal.terminal ------------------------------------------------------
+//
+// The kernel's terminal settings, in the kernel's own layout. A C library's
+// `struct termios' is not this structure: several of them carry additional
+// fields, and one compiled against a different library would read the wrong
+// words. The comment at the head of this file states the rule; this is an
+// instance of it.
+struct ktermios {
+    okl_u32 iflag;
+    okl_u32 oflag;
+    okl_u32 cflag;
+    okl_u32 lflag;
+    unsigned char line;
+    unsigned char cc[19];
+};
+
+struct kwinsize {
+    unsigned short row;
+    unsigned short col;
+    unsigned short xpixel;
+    unsigned short ypixel;
+};
+
+enum : okl_long {
+    tcgets = 0x5401, tcsets = 0x5402, tiocgwinsz = 0x5413,
+};
+
+// Positions within ktermios::lflag. Named here for the same reason the numbers
+// above are: they belong to the kernel and not to any library.
+enum : okl_u32 { t_icanon = 0000002u, t_echo = 0000010u };
+
+// --- openkal.net and openkal.datagram --------------------------------------
+//
+// The kernel's socket address structures. `ksockaddr_storage' is large enough
+// for either family and is what a call that reports an address is given, so
+// that a reply naming a family this implementation did not ask for cannot write
+// beyond the object.
+enum : okl_long {
+    af_inet = 2, af_inet6 = 10,
+    sock_stream = 1, sock_dgram = 2, sock_cloexec = 02000000,
+    ipproto_tcp = 6, ipproto_udp = 17,
+    sol_socket = 1, so_reuseaddr = 2,
+};
+
+struct ksockaddr_in {
+    unsigned short family;
+    unsigned short port;      // network order
+    okl_u32        addr;      // network order
+    unsigned char  zero[8];
+};
+
+struct ksockaddr_in6 {
+    unsigned short family;
+    unsigned short port;      // network order
+    okl_u32        flowinfo;
+    unsigned char  addr[16];  // network order
+    okl_u32        scope_id;
+};
+
+struct ksockaddr_storage {
+    unsigned short family;
+    unsigned char  pad[126];
+};
+
+// --- openkal.timeout -------------------------------------------------------
+struct kpollfd {
+    int   fd;
+    short events;
+    short revents;
+};
+
+enum : short { poll_in = 0x0001, poll_out = 0x0004 };
 
 // --- operations used by more than one interface ----------------------------
 

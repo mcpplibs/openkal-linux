@@ -1,0 +1,226 @@
+// The five interfaces version 0.8 added, examined through the module form.
+//
+// THIS IS THE C++ HALF OF CLAUSE 4.3. The specification distributes its
+// declarations in two forms and requires the two to declare the same entities.
+// tools/check-declarations.sh in the specification repository examines the C
+// form against SURFACE.txt; the C++ form is examined here, where a build of the
+// modules already exists. Neither form is therefore the other's source.
+//
+// The observations are of behaviour and not only of existence. A test that named
+// each entity and did nothing with it would compile against an implementation
+// whose every operation returned an error, and would report that as conformance.
+#include <cstdio>
+#include <cstring>
+import openkal.types;
+import openkal.stream;
+import openkal.terminal;
+import openkal.net;
+import openkal.datagram;
+import openkal.space;
+import openkal.timeout;
+import openkal.process;
+import openkal.abort;
+
+namespace {
+
+int failures = 0;
+
+void check(bool held, const char* what) {
+    if (!held) { std::printf("FAIL: %s\n", what); ++failures; }
+}
+
+kal_endpoint loopback(kal_u32 port) {
+    kal_endpoint ep{};
+    ep.addr[0] = 127; ep.addr[3] = 1;
+    ep.addr_len = 4;
+    ep.port = port;
+    return ep;
+}
+
+// openkal.terminal
+//
+// A run under a pipe has no terminal, which is the ordinary case here. What can
+// be observed without one is the refusal, and the refusal is the half of the
+// contract that says the interface reports rather than acts upon a stream it
+// does not apply to.
+void terminal_section() {
+    const auto out = kal_stdout();
+    // The property is named through the module rather than through the macro:
+    // a macro does not cross a module boundary, and kal::stream is where the
+    // module form states it.
+    const bool interactive =
+        kal::stream_props{kal_stream_props(out)}.has(kal::stream_prop::interactive);
+
+    const auto m = kal::terminal::get_mode(out);
+    if (interactive) {
+        check(m.e == kal_ok, "an interactive stream reports its mode");
+        check(kal::terminal::set_mode(out, m.m) == kal_ok,
+              "the mode that was read can be set back");
+    } else {
+        check(m.e == kal_err_not_supported,
+              "a stream that is not interactive refuses get_mode");
+    }
+
+    // The size outputs survive a refusal. They are pre-set to values the
+    // operation would not produce, so a backend that wrote them before failing
+    // would be visible here rather than in a caller's arithmetic.
+    kal_uintptr cols = 0xDEAD, rows = 0xBEEF;
+    const int rc = kal_terminal_size(out, &cols, &rows);
+    if (rc != kal_ok)
+        check(cols == 0xDEAD && rows == 0xBEEF,
+              "a refused size leaves both outputs untouched");
+}
+
+// openkal.net
+void net_section() {
+    const auto want = loopback(0);
+    const auto l = kal::net::listen(want);
+    check(l.e == kal_ok, "a listener opens on the loopback address");
+    if (l.e != kal_ok) return;
+
+    const auto bound = kal::net::local(l.l);
+    check(bound.e == kal_ok && bound.ep.port != 0,
+          "a listener opened on port zero reports the port it was given");
+    if (bound.e != kal_ok || bound.ep.port == 0) { kal::net::close(l.l); return; }
+
+    const auto c = kal::net::connect(loopback(bound.ep.port));
+    check(c.e == kal_ok, "a connection to the listener is established");
+    if (c.e != kal_ok) { kal::net::close(l.l); return; }
+
+    const auto a = kal::net::accept(l.l);
+    check(a.e == kal_ok, "the listener accepts the connection");
+    if (a.e != kal_ok) { kal::net::close(c.c); kal::net::close(l.l); return; }
+
+    // The streams the two connections own. Borrowed, and released with the
+    // connection rather than separately.
+    const auto cs = kal::net::stream(c.c);
+    const auto ss = kal::net::stream(a.c);
+
+    // A connection is a stream, and its bytes move through the stream
+    // operations. That this interface adds no transfer operation of its own is
+    // the property being observed.
+    const char msg[] = "openkal";
+    const auto w = kal_stream_write(cs, msg, sizeof msg - 1);
+    check(w.e == kal_ok && w.n == sizeof msg - 1,
+          "a connection carries bytes through the stream operations");
+
+    char buf[16] = {};
+    const auto r = kal_stream_read(ss, buf, sizeof buf);
+    check(r.e == kal_ok && r.n == sizeof msg - 1 &&
+              std::memcmp(buf, msg, sizeof msg - 1) == 0,
+          "the bytes read are the bytes written");
+
+    if (kal::net::has(kal::net::halfclose)) {
+        check(kal::net::shutdown(c.c, kal::net::shut::write) == kal_ok,
+              "a claimed half-closure is performed");
+        char eof[4] = {};
+        const auto e = kal_stream_read(ss, eof, sizeof eof);
+        check(e.e == kal_ok && e.n == 0,
+              "the peer observes end of input after a half-closure");
+    }
+
+    // An endpoint whose length this implementation does not know is refused
+    // rather than read as one it does.
+    kal_endpoint odd{};
+    odd.addr_len = 7;
+    const auto bad = kal::net::connect(odd);
+    check(bad.e == kal_err_invalid,
+          "an endpoint of unknown length is refused, not misread");
+
+    kal::net::close(a.c);
+    kal::net::close(c.c);
+    kal::net::close(l.l);
+}
+
+// openkal.datagram
+void datagram_section() {
+    const auto rx = kal::datagram::open(loopback(0));
+    check(rx.e == kal_ok, "a datagram endpoint opens on the loopback address");
+    if (rx.e != kal_ok) return;
+
+    const auto bound = kal::datagram::local(rx.d);
+    check(bound.e == kal_ok && bound.ep.port != 0,
+          "an endpoint opened on port zero reports the port it was given");
+    if (bound.e != kal_ok || bound.ep.port == 0) { kal::datagram::close(rx.d); return; }
+
+    const auto tx = kal::datagram::open();
+    check(tx.e == kal_ok, "an endpoint that only sends opens without an address");
+    if (tx.e != kal_ok) { kal::datagram::close(rx.d); return; }
+
+    const char msg[] = "openkal";
+    const auto w = kal::datagram::send_to(tx.d, msg, sizeof msg - 1,
+                                          loopback(bound.ep.port));
+    check(w.e == kal_ok && w.n == sizeof msg - 1,
+          "a message is sent whole and the count is the length given");
+
+    char buf[16] = {};
+    const auto got = kal::datagram::recv_from(rx.d, buf, sizeof buf);
+    check(got.r.e == kal_ok && got.r.n == sizeof msg - 1 &&
+              std::memcmp(buf, msg, sizeof msg - 1) == 0,
+          "the message received is the message sent");
+    check(got.from.addr_len == 4, "the sender of a received message is reported");
+
+    kal::datagram::close(tx.d);
+    kal::datagram::close(rx.d);
+}
+
+// openkal.space
+//
+// The exit status is the only channel a separate address space has, so the entry
+// reports through it and the caller's own memory is checked to be unchanged.
+int marker = 0;
+
+void child_entry(void* arg) {
+    marker = 1;                       // in the copy, not in the caller
+    kal_exit(arg == nullptr ? 3 : 7);
+}
+
+void space_section() {
+    int local = 0;
+    const auto p = kal::space::start(&child_entry, static_cast<void*>(&local),
+                                     nullptr);
+    check(p.e == kal_ok, "a context starts in a copy of the space");
+    if (p.e != kal_ok) return;
+
+    int status = 0, terminated = 0;
+    check(kal_process_wait(p.p, &status, &terminated) == kal_ok,
+          "the started context is waited for as a process");
+    check(terminated == 0, "the started context ended of its own accord");
+    check(status == 7, "the entry received the argument it was given");
+    check(marker == 0, "a store in the copied space is not observed in the original");
+    kal_process_close(p.p);
+}
+
+// openkal.timeout
+void timeout_section() {
+    check(kal_timeout_granularity_ns > 0,
+          "the granularity is a positive number of nanoseconds");
+
+    // A bounded read of a listener that nobody connects to must expire rather
+    // than wait. A listener is used rather than the standard input because the
+    // latter may be a file, which is always ready.
+    const auto l = kal::net::listen(loopback(0));
+    if (l.e == kal_ok) {
+        const auto a = kal::timeout::accept(l.l, 1000000 /* one millisecond */);
+        check(a.e == kal_err_again,
+              "an accept that nobody answers expires as kal_err_again");
+        kal::net::close(l.l);
+    }
+
+    // A transfer of zero bytes does not wait and is not bounded.
+    const auto w = kal::timeout::write(kal_stdout(), "", 0, 1);
+    check(w.e == kal_ok, "a bounded transfer of zero bytes succeeds");
+}
+
+}  // namespace
+
+int main() {
+    terminal_section();
+    net_section();
+    datagram_section();
+    space_section();
+    timeout_section();
+
+    if (failures == 0) std::printf("openkal 0.8 interfaces: every observation held\n");
+    return failures == 0 ? 0 : 1;
+}

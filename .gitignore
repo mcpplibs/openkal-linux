@@ -17,3 +17,6 @@ compile_commands.json
 # What a system leaves behind.
 .DS_Store
 Thumbs.db
+
+# The specification tree tools/run-conformance.sh clones beside the sources.
+.spec/
