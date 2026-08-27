@@ -172,7 +172,20 @@ jobs:
 
       - name: Every interface, every kind of examination
         run: |
-          bash .spec/tools/run-conformance.sh openkal-linux . full
+          # ⚠️⚠️ `optional` IS PART OF THE SET AND WAS NOT, WHICH MADE THE STEP'S
+          # OWN NAME UNTRUE.
+          #
+          # `full` expands to `standard,abi,stability,cost`, and `standard` is
+          # the HOSTED set — core, env, time, fs, process, task. The five
+          # interfaces openkal 0.8 added are in `optional`, and this
+          # implementation provides all of them; without naming that set the
+          # suite compiled their sections with the bodies removed and reported
+          # them as not examined. Nothing failed, and nothing was checked.
+          #
+          # This implementation is the one that may name `optional` entire: it
+          # is the only one providing every interface, which is why it is the
+          # reference. A backend that declines one names the others by hand.
+          bash .spec/tools/run-conformance.sh openkal-linux . full,optional
 
       - name: Point at the specification's working tree
         run: |

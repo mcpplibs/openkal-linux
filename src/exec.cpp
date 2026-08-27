@@ -43,6 +43,35 @@ int kal_exec_publish(void* p, kal_uintptr size) {
                                 static_cast<okl_long>(bytes),
                                 okl::prot_read | okl::prot_exec);
     if (okl::failed(r)) return okl::translate(r);
+
+    // ⚠️⚠️ THE INSTRUCTION CACHE IS NOT INVALIDATED HERE, AND THE OTHER TWO
+    // IMPLEMENTATIONS DO INVALIDATE IT. THE ASYMMETRY IS DELIBERATE.
+    //
+    // A processor with separate caches for data and instructions has just had
+    // bytes written through the data path that it is about to fetch through the
+    // instruction path, and nothing in the protection call makes the second path
+    // observe the first's writes.
+    //
+    // ⭐ THE SPECIFICATION PLACES THE MAINTENANCE UPON THE PROGRAM, and the
+    // conformance suite performs it itself and says why: the program is the
+    // party that knows which bytes it wrote. So an implementation that performs
+    // it is being helpful rather than conforming, and one that does not is not
+    // deficient.
+    //
+    // ⚠️ AND HERE IT WOULD COST SOMETHING THE OTHER TWO DO NOT PAY.
+    // `__builtin___clear_cache' expands to nothing on x86_64 and to a
+    // maintenance sequence on aarch64 --- and on riscv64 it becomes a CALL to
+    // `__riscv_flush_icache', which lives in the compiler's support library.
+    // This implementation sits beneath a C library and is linked into programs
+    // that carry no other runtime; acquiring a link-time dependency upon that
+    // library, on one architecture, to perform an operation the specification
+    // does not require of it, is a worse trade than the asymmetry.
+    //
+    // openkal-macos reaches both of its architectures with the builtin alone
+    // and openkal-windows has a system call for it, so neither pays that price
+    // and both do it. The three agree about what the PROGRAM must do; they
+    // differ in whether the implementation does it as well, which no program
+    // that follows the specification can observe.
     return kal_ok;
 }
 
