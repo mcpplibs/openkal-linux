@@ -212,9 +212,53 @@ void timeout_section() {
     check(w.e == kal_ok, "a bounded transfer of zero bytes succeeds");
 }
 
+// The three operations openkal 0.8 adds to openkal.process.
+//
+// ADDING TO AN EXISTING INTERFACE OBLIGES EVERY IMPLEMENTATION OF IT, which is
+// not true of adding a new interface: clause 6.1 makes a new one optional and
+// clause 6.1 makes an incomplete one a deviation. The surface checker caught the
+// omission here before anything else did, and these observations are what says
+// the names do something rather than merely existing.
+void process_additions_section() {
+    // A channel carries bytes from one end to the other. Both ends are owned and
+    // both are released through kal_process_channel_close.
+    kal_stream mine{}, theirs{};
+    const int rc = kal_process_channel(&mine, &theirs);
+    check(rc == kal_ok, "a channel is created");
+    if (rc != kal_ok) return;
+
+    const char msg[] = "through the channel";
+    const auto w = kal_stream_write(theirs, msg, sizeof msg - 1);
+    check(w.e == kal_ok && w.n == sizeof msg - 1,
+          "the far end of a channel accepts bytes");
+
+    char buf[64] = {};
+    const auto r = kal_stream_read(mine, buf, sizeof buf);
+    check(r.e == kal_ok && r.n == sizeof msg - 1 &&
+              std::memcmp(buf, msg, sizeof msg - 1) == 0,
+          "the near end reads what the far end wrote");
+
+    // THE END OF INPUT IS WHAT THE RELEASE IS FOR. A parent that does not close
+    // the far end after a spawn never observes it, which is the deadlock this
+    // pair invites and the reason the release is declared beside the operation.
+    kal_process_channel_close(theirs);
+    const auto eof = kal_stream_read(mine, buf, sizeof buf);
+    check(eof.e == kal_ok && eof.n == 0,
+          "closing the far end is observed as end of input on the near one");
+    kal_process_channel_close(mine);
+
+    // The property word claims both additions, so both must be answered. Named
+    // through the module, because a macro does not cross a module boundary.
+    check(kal::process::has(kal::process::channel),
+          "the property word claims the channel it just provided");
+    check(kal::process::has(kal::process::grant_dir),
+          "the property word claims the directory grant");
+}
+
 }  // namespace
 
 int main() {
+    process_additions_section();
     terminal_section();
     net_section();
     datagram_section();

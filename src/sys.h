@@ -102,7 +102,7 @@ enum : okl_long {
     nr_socket = 41, nr_connect = 42, nr_accept = 43, nr_sendto = 44,
     nr_recvfrom = 45, nr_shutdown = 48, nr_bind = 49, nr_listen = 50,
     nr_getsockname = 51, nr_getpeername = 52, nr_accept4 = 288,
-    nr_setsockopt = 54,
+    nr_setsockopt = 54, nr_pipe2 = 293,
     // openkal.timeout. ppoll and not poll: the bound is stated in nanoseconds
     // and poll takes milliseconds, so poll could not express a bound finer than
     // the granularity this implementation reports.
@@ -185,7 +185,7 @@ enum : okl_long {
     nr_socket = 198, nr_connect = 203, nr_accept = 202, nr_sendto = 206,
     nr_recvfrom = 207, nr_shutdown = 210, nr_bind = 200, nr_listen = 201,
     nr_getsockname = 204, nr_getpeername = 205, nr_accept4 = 242,
-    nr_setsockopt = 208,
+    nr_setsockopt = 208, nr_pipe2 = 59,
     // openkal.timeout. This architecture has no `poll' at all, only `ppoll',
     // which is a second reason the bound is expressed through the latter.
     nr_ppoll = 73,
