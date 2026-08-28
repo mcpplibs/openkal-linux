@@ -18,6 +18,8 @@
 // library defines `malloc' too, so the call resolves to it, and it in turn
 // calls this implementation. See src/sys.h.
 
+namespace okl { okl_ulong auxval(okl_ulong key); }
+
 namespace {
 
 
@@ -141,6 +143,28 @@ void kal_free(void* p, kal_uintptr size, kal_uintptr align) {
     const okl_uptr total = reinterpret_cast<okl_uptr*>(user)[-1];
     auto*  base = reinterpret_cast<void*>(reinterpret_cast<okl_uptr*>(user)[-2]);
     unmap(base, total);
+}
+
+
+// The quantum this environment allocates and protects memory in.
+//
+// AN OPERATION AND NOT A CONSTANT, BECAUSE IT IS A PROPERTY OF THE MACHINE THE
+// PROGRAM RUNS ON. A C library above this reports it as its own page size; one
+// that fixed it when it was built is wrong on every machine whose quantum
+// differs from the one it was built for, which is what a distributed binary
+// meets --- sixteen kilobytes on one family of hardware, sixty-four on another.
+//
+// The kernel states it in the auxiliary vector it leaves at inception. Where
+// that vector is absent --- a program whose entry did not record it --- the
+// value falls back to the architecture's smallest page, which is the smallest
+// quantum this kernel ever uses and is therefore never coarser than the truth.
+//
+// One number, and it is the coarsest that is always safe: this kernel allocates
+// and protects in the same unit, so the two are the same value here. An
+// implementation on a system where they differ reports the coarser.
+kal_uintptr kal_memory_granularity(void) {
+    const okl_ulong page = okl::auxval(6 /* AT_PAGESZ */);
+    return page != 0 ? static_cast<kal_uintptr>(page) : kPage;
 }
 
 }

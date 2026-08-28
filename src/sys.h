@@ -96,7 +96,7 @@ enum : okl_long {
     nr_clock_getres = 229, nr_exit_group = 231, nr_tgkill = 234,
     nr_openat = 257, nr_mkdirat = 258, nr_newfstatat = 262, nr_unlinkat = 263,
     nr_renameat = 264, nr_readlinkat = 267, nr_dup3 = 292, nr_execveat = 322,
-    nr_dup2 = 33, nr_utimensat = 280,
+    nr_dup2 = 33, nr_utimensat = 280, nr_symlinkat = 266, nr_fstatfs = 138,
     nr_getrandom = 318,
     // openkal.net and openkal.datagram
     nr_socket = 41, nr_connect = 42, nr_accept = 43, nr_sendto = 44,
@@ -179,7 +179,7 @@ enum : okl_long {
     nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226,
     nr_clone = 220, nr_execve = 221, nr_wait4 = 260, nr_renameat = 38,
     nr_dup3 = 24, nr_execveat = 281, nr_dup2 = -1,
-    nr_arch_prctl = -1, nr_utimensat = 88,
+    nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
     nr_getrandom = 278,
     // openkal.net and openkal.datagram
     nr_socket = 198, nr_connect = 203, nr_accept = 202, nr_sendto = 206,
@@ -258,6 +258,47 @@ inline bool failed(okl_long r) {
 inline bool interrupted(okl_long r) { return r == -e_intr; }
 
 // --- the kernel's structure layouts ----------------------------------------
+
+// What the kernel reports about the volume a descriptor is on. The layout is
+// the kernel's own `struct statfs', which is one layout on every architecture
+// this implementation supports because both are LP64.
+struct kstatfs {
+    okl_long f_type;
+    okl_long f_bsize;
+    okl_u64  f_blocks;
+    okl_u64  f_bfree;
+    okl_u64  f_bavail;
+    okl_u64  f_files;
+    okl_u64  f_ffree;
+    okl_u64  f_fsid;
+    okl_long f_namelen;
+    okl_long f_frsize;
+    okl_long f_flags;
+    okl_long f_spare[4];
+};
+
+// The magic numbers the kernel reports in `f_type', from its own uapi header.
+// A property that varies between the RESOURCES of an interface is answered by
+// an enquiry taking the resource, and on this kernel the resource's format is
+// what the enquiry has to consult.
+enum : okl_long {
+    fs_ext234    = 0xEF53,
+    fs_btrfs     = 0x9123683E,
+    fs_xfs       = 0x58465342,
+    fs_f2fs      = 0xF2F52010,
+    fs_tmpfs     = 0x01021994,
+    fs_overlay   = 0x794C7630,
+    fs_zfs       = 0x2FC12FC1,
+    fs_bcachefs  = 0xCA451A4E,
+    fs_msdos     = 0x4D44,        // vfat, and every FAT before it
+    fs_exfat     = 0x2011BAB0,
+    fs_ntfs      = 0x5346544E,
+    fs_ntfs3     = 0x7366746E,
+    fs_iso9660   = 0x9660,
+    fs_squashfs  = 0x73717368,
+    fs_erofs     = 0xE0F5E1E2,
+    fs_hfsplus   = 0x482B,
+};
 
 struct kstat {
     okl_u64 dev;
@@ -433,10 +474,19 @@ inline bool acceptable(const char* name, okl_uptr len) {
     return true;
 }
 
+// The greatest length of a name this implementation accepts, which is the
+// buffer below less the terminator it adds.
+//
+// A BOUND A CALLER CANNOT LEARN PRODUCES A FAILURE THE CALLER CANNOT ATTRIBUTE.
+// A longer name was refused as kal_err_invalid, which is also the answer for a
+// name that ascends --- so a program meeting the bound was told that its name
+// was malformed. `kal_fs_max_name' reports this.
+inline constexpr okl_uptr max_name = 4095;
+
 // A counted name becomes a terminated one for the kernel. The conversion is a
 // change of representation, not a namespace being reconstructed.
 struct terminated {
-    char buf[4096];
+    char buf[max_name + 1];
     bool ok;
     terminated(const char* s, okl_uptr n) : ok(n < sizeof buf) {
         if (ok) { copy(buf, s, n); buf[n] = '\0'; }

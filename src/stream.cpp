@@ -27,7 +27,11 @@ kal_stream kal_stdin (void) { return kal_stream{0}; }
 kal_stream kal_stdout(void) { return kal_stream{1}; }
 kal_stream kal_stderr(void) { return kal_stream{2}; }
 
-kal_io_result kal_stream_write(kal_stream s, const void* buf, kal_uintptr len) {
+// ONE SIGNED WORD: the count, or the negated condition when no byte moved.
+// Clause 5.2.1. A caller that moved some bytes and then met a condition is told
+// how many moved and meets the condition on its next call, which is what every
+// consumer of the earlier two-word form did with it by hand.
+kal_intptr kal_stream_write(kal_stream s, const void* buf, kal_uintptr len) {
     const auto* p = static_cast<const unsigned char*>(buf);
     kal_uintptr done = 0;
     while (done < len) {
@@ -40,23 +44,26 @@ kal_io_result kal_stream_write(kal_stream s, const void* buf, kal_uintptr len) {
         // reports it produces short writes on any system that delivers
         // signals --- a failure a test suite is unlikely to reproduce.
         if (okl::interrupted(r)) continue;
-        if (okl::failed(r)) return { done, okl::translate(r) };
+        if (okl::failed(r)) {
+            if (done != 0) return static_cast<kal_intptr>(done);
+            return -okl::translate(r);
+        }
         if (r == 0) break;
         done += static_cast<kal_uintptr>(r);
     }
-    return { done, done == len ? kal_ok : kal_err_io };
+    return static_cast<kal_intptr>(done);
 }
 
-kal_io_result kal_stream_read(kal_stream s, void* buf, kal_uintptr len) {
+kal_intptr kal_stream_read(kal_stream s, void* buf, kal_uintptr len) {
     for (;;) {
         const okl_long r = okl::sys(okl::nr_read, static_cast<okl_long>(s.h),
                                     reinterpret_cast<okl_long>(buf),
                                     static_cast<okl_long>(len));
         if (okl::interrupted(r)) continue;
-        if (okl::failed(r)) return { 0, okl::translate(r) };
+        if (okl::failed(r)) return -okl::translate(r);
         // A short read is reported as it occurred. Unlike a short write it
         // carries information the caller requires: zero denotes end of input.
-        return { static_cast<kal_uintptr>(r), kal_ok };
+        return static_cast<kal_intptr>(r);
     }
 }
 

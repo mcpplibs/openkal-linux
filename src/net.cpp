@@ -127,12 +127,13 @@ int kal_net_accept(kal_net_listener l, kal_net_conn* out) {
     }
 }
 
-kal_uintptr kal_net_stream(kal_net_conn c) {
+kal_stream kal_net_stream(kal_net_conn c) {
     // The bare descriptor, for the reason kal_fs_stream gives: openkal.stream's
     // operations take whatever the environment's transfer calls take, and a
-    // packed word is not that.
+    // packed word is not that. It carries its type, so a handle crossing
+    // between two interfaces is not a word either of them has to interpret.
     const int fd = fd_of(c);
-    return fd < 0 ? 0u : static_cast<kal_uintptr>(fd);
+    return kal_stream{ fd < 0 ? 0u : static_cast<kal_uintptr>(fd) };
 }
 
 int kal_net_peer(kal_net_conn c, kal_endpoint* out) {
@@ -186,6 +187,6 @@ void kal_net_close_listener(kal_net_listener l) {
 // the socket call then reports it at the point of the attempt, and a word that
 // claimed less than the kernel offers would withhold a facility a caller could
 // have used.
-const kal_uintptr kal_net_props = KAL_NET_PROP_IPV6 | KAL_NET_PROP_HALFCLOSE;
+kal_uintptr kal_net_props(void) { return KAL_NET_PROP_IPV6 | KAL_NET_PROP_HALFCLOSE; }
 
 }  // extern "C"
