@@ -265,14 +265,41 @@ jobs:
           # __libc_start_main and main are the hand-over, and are undefined here
           # by construction.
           permitted='^(memcpy|memmove|memset|memcmp|__libc_start_main|main|_GLOBAL_OFFSET_TABLE_|kal_[a-z_]+|__init_array_start|__init_array_end|__preinit_array_start|__preinit_array_end|_ZN3okl.*)$'
+
+          # ⭐⭐ ONE NAME IS PERMITTED ONLY IF IT IS WEAK, AND THE WEAKNESS IS
+          # THE WHOLE OF THE PERMISSION.
+          #
+          # `environ' is how src/env.cpp recovers the vectors the kernel placed
+          # on the stack when the C library above did not pass them --- glibc
+          # calls every `.init_array' entry with (argc, argv, envp) and musl
+          # calls them with none, so what arrived there was register residue.
+          #
+          # It is admissible where `puts' is not, and the difference is not that
+          # it is smaller. This check exists because a CALL into the runtime a
+          # program supplied resolves to the program's and can re-enter this
+          # implementation without bound. A pointer executes nothing. And being
+          # WEAK it is null in a program that has no C library, so it does not
+          # make one required --- which a strong reference to the same name
+          # would, silently, and is why the type letter is checked and not just
+          # the name.
+          weak_permitted='^environ$'
           bad=0
-          for s in $(nm --undefined-only $objs | awk '{print $2}' | sort -u); do
-            [ -n "$s" ] || continue
-            if ! printf '%s\n' "$s" | grep -qE "$permitted"; then
-              echo "the implementation references a symbol it must not: $s" >&2
-              bad=1
+          nm --undefined-only $objs | awk '{ print $1, $2 }' | sort -u |
+          while read -r kind name; do
+            [ -n "$name" ] || continue
+            printf '%s\n' "$name" | grep -qE "$permitted" && continue
+            if printf '%s\n' "$name" | grep -qE "$weak_permitted"; then
+              case "$kind" in
+                w|v) continue ;;
+                *)   echo "::error::$name is permitted only as a weak reference, and this one is '$kind'" >&2 ;;
+              esac
+            else
+              echo "the implementation references a symbol it must not: $name" >&2
             fi
+            echo bad >> "$RUNNER_TEMP/independence.bad"
           done
+          [ -s "$RUNNER_TEMP/independence.bad" ] && bad=1
+          rm -f "$RUNNER_TEMP/independence.bad"
           test "$bad" -eq 0
           echo "the implementation references no C library symbol"
 

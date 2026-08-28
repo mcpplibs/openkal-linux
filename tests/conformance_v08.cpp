@@ -100,13 +100,13 @@ void net_section() {
     // operations. That this interface adds no transfer operation of its own is
     // the property being observed.
     const char msg[] = "openkal";
-    const auto w = kal_stream_write(cs, msg, sizeof msg - 1);
-    check(w.e == kal_ok && w.n == sizeof msg - 1,
+    const kal_intptr w = kal_stream_write(cs, msg, sizeof msg - 1);
+    check(w == static_cast<kal_intptr>(sizeof msg - 1),
           "a connection carries bytes through the stream operations");
 
     char buf[16] = {};
-    const auto r = kal_stream_read(ss, buf, sizeof buf);
-    check(r.e == kal_ok && r.n == sizeof msg - 1 &&
+    const kal_intptr r = kal_stream_read(ss, buf, sizeof buf);
+    check(r == static_cast<kal_intptr>(sizeof msg - 1) &&
               std::memcmp(buf, msg, sizeof msg - 1) == 0,
           "the bytes read are the bytes written");
 
@@ -114,9 +114,8 @@ void net_section() {
         check(kal::net::shutdown(c.c, kal::net::shut::write) == kal_ok,
               "a claimed half-closure is performed");
         char eof[4] = {};
-        const auto e = kal_stream_read(ss, eof, sizeof eof);
-        check(e.e == kal_ok && e.n == 0,
-              "the peer observes end of input after a half-closure");
+        const kal_intptr e = kal_stream_read(ss, eof, sizeof eof);
+        check(e == 0, "the peer observes end of input after a half-closure");
     }
 
     // An endpoint whose length this implementation does not know is refused
@@ -150,12 +149,12 @@ void datagram_section() {
     const char msg[] = "openkal";
     const auto w = kal::datagram::send_to(tx.d, msg, sizeof msg - 1,
                                           loopback(bound.ep.port));
-    check(w.e == kal_ok && w.n == sizeof msg - 1,
+    check(w == static_cast<kal_intptr>(sizeof msg - 1),
           "a message is sent whole and the count is the length given");
 
     char buf[16] = {};
     const auto got = kal::datagram::recv_from(rx.d, buf, sizeof buf);
-    check(got.r.e == kal_ok && got.r.n == sizeof msg - 1 &&
+    check(got.n == static_cast<kal_intptr>(sizeof msg - 1) &&
               std::memcmp(buf, msg, sizeof msg - 1) == 0,
           "the message received is the message sent");
     check(got.from.addr_len == 4, "the sender of a received message is reported");
@@ -193,7 +192,7 @@ void space_section() {
 
 // openkal.timeout
 void timeout_section() {
-    check(kal_timeout_granularity_ns > 0,
+    check(kal_timeout_granularity() > 0,
           "the granularity is a positive number of nanoseconds");
 
     // A bounded read of a listener that nobody connects to must expire rather
@@ -208,8 +207,8 @@ void timeout_section() {
     }
 
     // A transfer of zero bytes does not wait and is not bounded.
-    const auto w = kal::timeout::write(kal_stdout(), "", 0, 1);
-    check(w.e == kal_ok, "a bounded transfer of zero bytes succeeds");
+    const kal_intptr w = kal::timeout::write(kal_stdout(), "", 0, 1);
+    check(w >= 0, "a bounded transfer of zero bytes succeeds");
 }
 
 // The three operations openkal 0.8 adds to openkal.process.
@@ -228,13 +227,13 @@ void process_additions_section() {
     if (rc != kal_ok) return;
 
     const char msg[] = "through the channel";
-    const auto w = kal_stream_write(theirs, msg, sizeof msg - 1);
-    check(w.e == kal_ok && w.n == sizeof msg - 1,
+    const kal_intptr w = kal_stream_write(theirs, msg, sizeof msg - 1);
+    check(w == static_cast<kal_intptr>(sizeof msg - 1),
           "the far end of a channel accepts bytes");
 
     char buf[64] = {};
-    const auto r = kal_stream_read(mine, buf, sizeof buf);
-    check(r.e == kal_ok && r.n == sizeof msg - 1 &&
+    const kal_intptr r = kal_stream_read(mine, buf, sizeof buf);
+    check(r == static_cast<kal_intptr>(sizeof msg - 1) &&
               std::memcmp(buf, msg, sizeof msg - 1) == 0,
           "the near end reads what the far end wrote");
 
@@ -242,8 +241,8 @@ void process_additions_section() {
     // the far end after a spawn never observes it, which is the deadlock this
     // pair invites and the reason the release is declared beside the operation.
     kal_process_channel_close(theirs);
-    const auto eof = kal_stream_read(mine, buf, sizeof buf);
-    check(eof.e == kal_ok && eof.n == 0,
+    const kal_intptr eof = kal_stream_read(mine, buf, sizeof buf);
+    check(eof == 0,
           "closing the far end is observed as end of input on the near one");
     kal_process_channel_close(mine);
 

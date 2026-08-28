@@ -260,8 +260,9 @@ int kal_task_wake(const kal_u32* word, kal_uintptr count, kal_uintptr* woken) {
 // The thread-local position is reported in both configurations, and it is true
 // in both for different reasons: the C library's threads establish the
 // convention, and so does the block this implementation builds. Clause 7.10.
-const kal_uintptr kal_task_props =
-    KAL_TASK_PROP_PREEMPTIVE | KAL_TASK_PROP_PARALLEL
-  | KAL_TASK_PROP_WAIT_TIMEOUT | KAL_TASK_PROP_THREAD_LOCAL;
+kal_uintptr kal_task_props(void) {
+    return KAL_TASK_PROP_PREEMPTIVE | KAL_TASK_PROP_PARALLEL
+         | KAL_TASK_PROP_WAIT_TIMEOUT | KAL_TASK_PROP_THREAD_LOCAL;
+}
 
 }

@@ -95,6 +95,10 @@ void kal_exec_free(void* p, kal_uintptr size) {
 // A published region may be reserved for writing again: this kernel's
 // protection call is not one-way. The position is set accordingly, and a
 // caller that must change published bytes need not abandon the region.
-const kal_uintptr kal_exec_props = KAL_EXEC_PROP_REPUBLISH;
+kal_uintptr kal_exec_props(void) {
+    // Executable memory is available to every artifact on this kernel: nothing
+    // here is granted only to a program produced in a particular way.
+    return KAL_EXEC_PROP_REPUBLISH | KAL_EXEC_PROP_AVAILABLE;
+}
 
 }  // extern "C"

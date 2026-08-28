@@ -52,4 +52,4 @@ extern "C" int kal_random_fill(void* out, kal_uintptr len) {
 // Blocking, because GRND_NONBLOCK is not set above. Not hardware: the kernel's
 // pool is what this reads, and whether the pool was seeded from a hardware
 // source is not something this backend can observe.
-extern "C" const kal_uintptr kal_random_props = KAL_RANDOM_PROP_BLOCKING;
+extern "C" kal_uintptr kal_random_props(void) { return KAL_RANDOM_PROP_BLOCKING; }

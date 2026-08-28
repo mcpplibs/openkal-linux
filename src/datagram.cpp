@@ -71,15 +71,15 @@ int kal_datagram_local(kal_datagram d, kal_endpoint* out) {
     return okl::from_kernel(ss, *out);
 }
 
-kal_io_result kal_datagram_send_to(kal_datagram d, const void* buf, kal_uintptr len,
-                                   const kal_endpoint* to) {
+kal_intptr kal_datagram_send_to(kal_datagram d, const void* buf, kal_uintptr len,
+                                const kal_endpoint* to) {
     const int fd = fd_of(d);
-    if (fd < 0 || to == nullptr) return { 0, kal_err_invalid };
+    if (fd < 0 || to == nullptr) return -kal_err_invalid;
 
     okl::ksockaddr_storage ss{};
     okl_long addrlen = 0;
     if (const int rc = okl::to_kernel(*to, ss, addrlen); rc != kal_ok)
-        return { 0, rc };
+        return -rc;
 
     for (;;) {
         const okl_long r = okl::sys(okl::nr_sendto, fd,
@@ -87,7 +87,7 @@ kal_io_result kal_datagram_send_to(kal_datagram d, const void* buf, kal_uintptr 
                                     static_cast<okl_long>(len), 0,
                                     reinterpret_cast<okl_long>(&ss), addrlen);
         if (okl::interrupted(r)) continue;
-        if (okl::failed(r)) return { 0, okl::translate(r) };
+        if (okl::failed(r)) return -okl::translate(r);
 
         // A MESSAGE IS SENT WHOLE OR NOT AT ALL, which is what this interface
         // states. The kernel reports a count anyway; a count short of the length
@@ -96,14 +96,14 @@ kal_io_result kal_datagram_send_to(kal_datagram d, const void* buf, kal_uintptr 
         // a caller a partial send this interface says cannot occur, so it is
         // reported as a failure of the medium instead.
         const kal_uintptr n = static_cast<kal_uintptr>(r);
-        return { n, n == len ? kal_ok : kal_err_io };
+        return n == len ? static_cast<kal_intptr>(n) : -kal_err_io;
     }
 }
 
-kal_io_result kal_datagram_recv_from(kal_datagram d, void* buf, kal_uintptr len,
-                                     kal_endpoint* from) {
+kal_intptr kal_datagram_recv_from(kal_datagram d, void* buf, kal_uintptr len,
+                                  kal_endpoint* from) {
     const int fd = fd_of(d);
-    if (fd < 0) return { 0, kal_err_invalid };
+    if (fd < 0) return -kal_err_invalid;
 
     okl::ksockaddr_storage ss{};
     okl_long addrlen = static_cast<okl_long>(sizeof ss);
@@ -115,7 +115,7 @@ kal_io_result kal_datagram_recv_from(kal_datagram d, void* buf, kal_uintptr len,
                                     reinterpret_cast<okl_long>(&ss),
                                     reinterpret_cast<okl_long>(&addrlen));
         if (okl::interrupted(r)) continue;
-        if (okl::failed(r)) return { 0, okl::translate(r) };
+        if (okl::failed(r)) return -okl::translate(r);
 
         // THE COUNT REPORTED IS WHAT WAS PLACED IN THE BUFFER, not what was
         // sent. Without MSG_TRUNC the kernel already reports the former, which
@@ -131,7 +131,7 @@ kal_io_result kal_datagram_recv_from(kal_datagram d, void* buf, kal_uintptr len,
                 from->port     = 0;
             }
         }
-        return { static_cast<kal_uintptr>(r), kal_ok };
+        return static_cast<kal_intptr>(r);
     }
 }
 
@@ -146,6 +146,6 @@ void kal_datagram_close(kal_datagram d) {
 // been set, and this interface has no operation that would set it; a word
 // claiming a facility no operation reaches is the disagreement clause 6.2 exists
 // to prevent.
-const kal_uintptr kal_datagram_props = KAL_DGRAM_PROP_IPV6;
+kal_uintptr kal_datagram_props(void) { return KAL_DGRAM_PROP_IPV6; }
 
 }  // extern "C"

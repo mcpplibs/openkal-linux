@@ -46,8 +46,9 @@ void kal_time_sleep(kal_duration ns) {
 
 // The monotonic clock of this kernel does not advance while the machine is
 // suspended, which the corresponding property records.
-const kal_uintptr kal_time_props =
-    KAL_TIME_PROP_WALL_AVAILABLE | KAL_TIME_PROP_MONOTONIC_SUSPENDS
-  | KAL_TIME_PROP_SLEEP_PRECISE;
+kal_uintptr kal_time_props(void) {
+    return KAL_TIME_PROP_WALL_AVAILABLE | KAL_TIME_PROP_MONOTONIC_SUSPENDS
+         | KAL_TIME_PROP_SLEEP_PRECISE;
+}
 
 }

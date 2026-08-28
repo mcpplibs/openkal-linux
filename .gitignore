@@ -19,4 +19,9 @@ compile_commands.json
 Thumbs.db
 
 # The specification tree tools/run-conformance.sh clones beside the sources.
-.spec/
+#
+# ⚠️ NO TRAILING SLASH. `.spec/' matches a directory and does not match a
+# SYMBOLIC LINK to one, which is what a working checkout naturally has; the link
+# was consequently committed once, pointing at a path that exists on one
+# machine.
+.spec

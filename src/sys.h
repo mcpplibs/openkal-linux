@@ -96,7 +96,7 @@ enum : okl_long {
     nr_clock_getres = 229, nr_exit_group = 231, nr_tgkill = 234,
     nr_openat = 257, nr_mkdirat = 258, nr_newfstatat = 262, nr_unlinkat = 263,
     nr_renameat = 264, nr_readlinkat = 267, nr_dup3 = 292, nr_execveat = 322,
-    nr_dup2 = 33, nr_utimensat = 280,
+    nr_dup2 = 33, nr_utimensat = 280, nr_symlinkat = 266, nr_fstatfs = 138,
     nr_getrandom = 318,
     // openkal.net and openkal.datagram
     nr_socket = 41, nr_connect = 42, nr_accept = 43, nr_sendto = 44,
@@ -179,7 +179,7 @@ enum : okl_long {
     nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226,
     nr_clone = 220, nr_execve = 221, nr_wait4 = 260, nr_renameat = 38,
     nr_dup3 = 24, nr_execveat = 281, nr_dup2 = -1,
-    nr_arch_prctl = -1, nr_utimensat = 88,
+    nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
     nr_getrandom = 278,
     // openkal.net and openkal.datagram
     nr_socket = 198, nr_connect = 203, nr_accept = 202, nr_sendto = 206,
@@ -211,10 +211,44 @@ enum : int {
 };
 
 // --- constants the kernel defines ------------------------------------------
+//
+// ⚠️⚠️ THREE OF THESE ARE NOT THE SAME NUMBER ON BOTH ARCHITECTURES, AND WERE
+// WRITTEN AS THOUGH THEY WERE.
+//
+// `O_DIRECTORY', `O_NOFOLLOW' and `O_DIRECT' have one set of values on x86_64
+// and another in the kernel's architecture-independent header, which is what
+// aarch64 uses. The three values below were x86_64's:
+//
+//                     x86_64      aarch64 (asm-generic)
+//     O_DIRECTORY     0200000     040000
+//     O_NOFOLLOW      0400000     0100000
+//     O_DIRECT        040000      0200000
+//
+// So on aarch64 this implementation asked for O_DIRECT where it meant
+// O_DIRECTORY. The kernel refuses O_DIRECT on a directory, so EVERY DIRECTORY
+// THIS IMPLEMENTATION TRIED TO OPEN FAILED --- including the two preopens it
+// supplies at inception, which is every directory a program above it can reach.
+//
+// ⭐ MEASURED, and the reading is unambiguous: on aarch64 `kal_fs_preopen_count'
+// answered two and both entries reported `kal_err_permission' with a handle of
+// zero, while the same program on x86_64 reported both directories and opened a
+// file in one. A C library above it then had no directory to resolve a name
+// against, so every `open' answered ENOENT and `getcwd' answered "/" --- which
+// reads as a program started somewhere odd rather than as an implementation
+// that opened nothing.
+//
+// ⚠️ Nothing caught it. The conformance suite is run on x86_64; this package is
+// built for aarch64 and the build succeeds, because a wrong constant is a
+// number and not a type error.
 enum : okl_long {
     o_rdonly = 0, o_wronly = 1, o_rdwr = 2,
     o_creat = 0100, o_excl = 0200, o_trunc = 01000, o_append = 02000,
-    o_directory = 0200000, o_cloexec = 02000000, o_nofollow = 0400000,
+    o_cloexec = 02000000,
+#if defined(__x86_64__)
+    o_directory = 0200000, o_nofollow = 0400000,
+#else
+    o_directory = 040000,  o_nofollow = 0100000,
+#endif
     at_fdcwd = -100, at_removedir = 0x200, at_symlink_nofollow = 0x100,
     prot_read = 1, prot_write = 2, prot_exec = 4, prot_none = 0,
     map_private = 2, map_anonymous = 0x20, map_stack = 0x20000,
@@ -259,6 +293,47 @@ inline bool interrupted(okl_long r) { return r == -e_intr; }
 
 // --- the kernel's structure layouts ----------------------------------------
 
+// What the kernel reports about the volume a descriptor is on. The layout is
+// the kernel's own `struct statfs', which is one layout on every architecture
+// this implementation supports because both are LP64.
+struct kstatfs {
+    okl_long f_type;
+    okl_long f_bsize;
+    okl_u64  f_blocks;
+    okl_u64  f_bfree;
+    okl_u64  f_bavail;
+    okl_u64  f_files;
+    okl_u64  f_ffree;
+    okl_u64  f_fsid;
+    okl_long f_namelen;
+    okl_long f_frsize;
+    okl_long f_flags;
+    okl_long f_spare[4];
+};
+
+// The magic numbers the kernel reports in `f_type', from its own uapi header.
+// A property that varies between the RESOURCES of an interface is answered by
+// an enquiry taking the resource, and on this kernel the resource's format is
+// what the enquiry has to consult.
+enum : okl_long {
+    fs_ext234    = 0xEF53,
+    fs_btrfs     = 0x9123683E,
+    fs_xfs       = 0x58465342,
+    fs_f2fs      = 0xF2F52010,
+    fs_tmpfs     = 0x01021994,
+    fs_overlay   = 0x794C7630,
+    fs_zfs       = 0x2FC12FC1,
+    fs_bcachefs  = 0xCA451A4E,
+    fs_msdos     = 0x4D44,        // vfat, and every FAT before it
+    fs_exfat     = 0x2011BAB0,
+    fs_ntfs      = 0x5346544E,
+    fs_ntfs3     = 0x7366746E,
+    fs_iso9660   = 0x9660,
+    fs_squashfs  = 0x73717368,
+    fs_erofs     = 0xE0F5E1E2,
+    fs_hfsplus   = 0x482B,
+};
+
 struct kstat {
     okl_u64 dev;
     okl_u64 ino;
@@ -273,23 +348,61 @@ struct kstat {
     okl_i64 blksize;
     okl_i64 blocks;
 #else
+    // ⚠️⚠️ THE FIELDS OF THIS ARCHITECTURE'S RECORD WERE IN THE WRONG ORDER, AND
+    // THE BUILD COULD NOT SAY SO.
+    //
+    // The kernel's architecture-independent `struct stat' --- which aarch64 uses
+    // --- places the mode immediately after the device and inode, and the size
+    // after the device number and one word of padding. The order below was
+    // neither: the mode was read from offset 60 where the kernel writes a
+    // group, and the size from 32 where it writes a device number.
+    //
+    // ⭐ MEASURED, the same program on both architectures:
+    //
+    //     x86_64    file: kind=1 size=10 writable=1   link: kind=3
+    //     aarch64   file: kind=4 size=0  writable=0   link: kind=4
+    //
+    // Every node on aarch64 was "some other kind of thing", of length zero and
+    // not writable. A C library above it reported that a file it had just
+    // written ten bytes to was not a regular file --- and every operation that
+    // decides upon a kind, which is most of `std::filesystem', decided wrongly.
+    //
+    // ⚠️ NOTHING IN THIS ECOSYSTEM COULD HAVE CAUGHT IT. The conformance suite
+    // runs on the machine that builds it, and every hosted machine in this
+    // ecosystem's continuous integration is x86_64 or an arm64 Mac --- which
+    // uses openkal-macos and a different record again. The aarch64 leg of THIS
+    // implementation is built and never run. The offsets are asserted below so
+    // that the next such error is a build failure rather than a wrong answer.
+    okl_u32 mode;
+    okl_u32 nlink;
+    okl_u32 uid;
+    okl_u32 gid;
     okl_u64 rdev;
     okl_u64 pad1;
     okl_i64 size;
     okl_u32 blksize;
     okl_u32 pad2;
     okl_i64 blocks;
-    okl_u32 nlink;
-    okl_u32 mode;
-    okl_u32 uid;
-    okl_u32 gid;
-    okl_u32 pad0;
 #endif
     okl_i64 atime_sec, atime_nsec;
     okl_i64 mtime_sec, mtime_nsec;
     okl_i64 ctime_sec, ctime_nsec;
     okl_i64 unused[3];
 };
+
+// The kernel writes this record; a field read from the wrong offset is a wrong
+// answer and not a failure, so the offsets are stated here rather than trusted.
+#if defined(__x86_64__)
+static_assert(__builtin_offsetof(kstat, mode)      == 24, "x86_64 struct stat");
+static_assert(__builtin_offsetof(kstat, size)      == 48, "x86_64 struct stat");
+static_assert(__builtin_offsetof(kstat, mtime_sec) == 88, "x86_64 struct stat");
+#else
+static_assert(__builtin_offsetof(kstat, mode)      == 16, "asm-generic struct stat");
+static_assert(__builtin_offsetof(kstat, size)      == 48, "asm-generic struct stat");
+static_assert(__builtin_offsetof(kstat, mtime_sec) == 88, "asm-generic struct stat");
+#endif
+static_assert(__builtin_offsetof(kstat, ino) == 8, "the inode follows the device");
+static_assert(sizeof(kstat) >= 128, "the kernel writes at least this much");
 
 enum : okl_u32 {
     s_ifmt = 0170000, s_ifreg = 0100000, s_ifdir = 0040000, s_iflnk = 0120000,
@@ -433,10 +546,19 @@ inline bool acceptable(const char* name, okl_uptr len) {
     return true;
 }
 
+// The greatest length of a name this implementation accepts, which is the
+// buffer below less the terminator it adds.
+//
+// A BOUND A CALLER CANNOT LEARN PRODUCES A FAILURE THE CALLER CANNOT ATTRIBUTE.
+// A longer name was refused as kal_err_invalid, which is also the answer for a
+// name that ascends --- so a program meeting the bound was told that its name
+// was malformed. `kal_fs_max_name' reports this.
+inline constexpr okl_uptr max_name = 4095;
+
 // A counted name becomes a terminated one for the kernel. The conversion is a
 // change of representation, not a namespace being reconstructed.
 struct terminated {
-    char buf[4096];
+    char buf[max_name + 1];
     bool ok;
     terminated(const char* s, okl_uptr n) : ok(n < sizeof buf) {
         if (ok) { copy(buf, s, n); buf[n] = '\0'; }
