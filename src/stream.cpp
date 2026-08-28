@@ -3,6 +3,26 @@
 
 extern "C" {
 
+// THE STREAMS ARE THIS ENVIRONMENT'S OWN DESCRIPTORS AND ARE NOT PACKED, which
+// is what `openkal.stream`'s transfer operations take and what makes a stream
+// this implementation hands out interchangeable with one it received.
+//
+// ⚠️⚠️ ONE CONSEQUENCE, AND IT IS NOT VISIBLE FROM THIS FILE. Standard input is
+// therefore the handle ZERO, and `kal_spawn_streams` reserves zero to mean
+// "the stream the parent has" (openkal/process.h). The two readings agree at
+// position `in` --- placing standard input at standard input and inheriting it
+// are the same act --- and cannot be told apart anywhere else, so a caller that
+// places its own standard input at position `out` is asking for something that
+// structure cannot express.
+//
+// The specification records the collision and what a caller should do about it;
+// openkal-musl refuses that spawn rather than passing on a word that would be
+// read as inheritance. An implementation MAY remove the ambiguity for every
+// caller by not answering any stream enquiry with zero, and this one does not:
+// packing these three would make a stream this implementation hands out
+// different in kind from the descriptors `kal_fs_stream` and
+// `kal_process_channel` report, and the interface has no operation that would
+// unpack it for the caller.
 kal_stream kal_stdin (void) { return kal_stream{0}; }
 kal_stream kal_stdout(void) { return kal_stream{1}; }
 kal_stream kal_stderr(void) { return kal_stream{2}; }
