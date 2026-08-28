@@ -34,9 +34,9 @@ bool put(const char* name, const char* text) {
     const auto flags = kal::fs::open::write | kal::fs::open::create
                      | kal::fs::open::truncate;
     if (kal::fs::open_file(here(), name, std::strlen(name), flags, &f) != kal_ok) return false;
-    const auto r = kal_stream_write(kal_stream{kal_fs_stream(f)}, text, std::strlen(text));
+    const kal_intptr r = kal_stream_write(kal_fs_stream(f), text, std::strlen(text));
     kal_fs_close_file(f);
-    return r.e == kal_ok;
+    return r == static_cast<kal_intptr>(std::strlen(text));
 }
 
 // Reads a whole file into the buffer and reports its length, or -1.
@@ -44,9 +44,9 @@ long get(const char* name, char* buf, kal_uintptr cap) {
     kal_file f{};
     if (kal::fs::open_file(here(), name, std::strlen(name), kal::fs::open::read, &f) != kal_ok)
         return -1;
-    const auto r = kal_stream_read(kal_stream{kal_fs_stream(f)}, buf, cap);
+    const kal_intptr r = kal_stream_read(kal_fs_stream(f), buf, cap);
     kal_fs_close_file(f);
-    return r.e == kal_ok ? static_cast<long>(r.n) : -1;
+    return r >= 0 ? static_cast<long>(r) : -1;
 }
 
 }  // namespace
@@ -86,7 +86,7 @@ int main() {
         // success for every call.
         kal_u64 at = 0;
         kal_fs_seek(a, 0, kal::fs::seek_set, &at);
-        kal_stream_write(kal_stream{kal_fs_stream(a)}, "two", 3);
+        kal_stream_write(kal_fs_stream(a), "two", 3);
         kal_fs_close_file(a);
     }
     len = get(name, buf, sizeof buf);
@@ -99,20 +99,20 @@ int main() {
         check(kal::fs::open_file(here(), name, n, kal::fs::open::write, &t) == kal_ok,
               "a file opens for setting its length");
         check(kal_fs_truncate(t, 2) == kal_ok, "the length is set");
-        kal_node_info info{};
-        check(kal_fs_file_info(t, &info) == kal_ok, "an open file is enquired about");
+        kal_node_info info{}; info.self_size = sizeof info;
+        check(kal_fs_file_info(t, kal::fs::field::all, &info) == kal_ok, "an open file is enquired about");
         check(info.size == 2, "the enquiry reports the length that was set");
         check(info.kind == kal_node_file, "the enquiry reports what the handle refers to");
         check(kal_fs_truncate(t, 9) == kal_ok, "the length is extended");
-        check(kal_fs_file_info(t, &info) == kal_ok && info.size == 9,
+        check(kal_fs_file_info(t, kal::fs::field::all, &info) == kal_ok && info.size == 9,
               "extending reports the larger length");
         kal_fs_close_file(t);
     }
 
     // --- absence is an answer, and is distinguishable ------------------------
     kal_fs_remove(here(), name, n);
-    kal_node_info gone{};
-    check(kal_fs_info(here(), name, n, &gone) == kal_ok && gone.kind == kal_node_absent,
+    kal_node_info gone{}; gone.self_size = sizeof gone;
+    check(kal_fs_info(here(), name, n, 0, kal::fs::field::all, &gone) == kal_ok && gone.kind == kal_node_absent,
           "enquiry about a name that does not exist is answered");
     check(kal::fs::open_file(here(), name, n, kal::fs::open::read, &f) == kal_err_not_found,
           "opening a name that does not exist reports that it does not exist");
