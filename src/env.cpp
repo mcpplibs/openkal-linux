@@ -34,8 +34,77 @@ okl_ulong auxval(okl_ulong key) {
 }  // namespace okl
 
 namespace {
+
+// ⚠️⚠️ ONE C LIBRARY PASSES THESE AND ANOTHER DOES NOT, AND THE ONE THAT DOES
+// NOT IS THE ONE THIS PACKAGE EXISTS TO SIT BENEATH.
+//
+// glibc calls every `.init_array' entry with (argc, argv, envp). musl calls
+// them with NO ARGUMENTS. A function declared to take three therefore receives
+// whatever the argument registers happened to hold, and this one recorded it.
+//
+// ⭐ MEASURED 2026-08-29, WITH THE CONTROL THAT SEPARATES THE TWO EXPLANATIONS.
+// It was found by running the tests for aarch64, where the first enquiry after
+// the count faulted --- which reads as an architecture defect. It is not:
+//
+//     target                argc         argv                envp
+//     x86_64-linux-gnu      1            <stack>             <stack>
+//     x86_64-linux-musl     0x4004c2     1                   <stack>
+//     aarch64-linux-musl    0x405ee4     1                   <stack>
+//
+// Both musl rows are shifted by one and the glibc row is not, so the axis is
+// the C library. Running only aarch64 would have attributed it to the machine.
+//
+// So the arguments are CHECKED rather than believed, and where they do not hold
+// the vectors are recovered from the one handle both libraries publish.
+bool plausible(int argc, char* const* argv, char* const* envp) {
+    if (argc < 0 || argc > 65536)   return false;
+    if (argv == nullptr)            return false;
+    if (envp == nullptr)            return false;
+    if (argv[argc] != nullptr)      return false;   // argv is terminated at argc
+    if (argc > 0 && argv[0] == nullptr) return false;
+    return true;
+}
+
+// ⚠️ WEAK, AND DATA RATHER THAN A CALL. The independence check in this package
+// forbids reaching for the C library's names, because a CALL into the runtime a
+// program supplied would resolve to the program's and could re-enter this
+// implementation without bound. A pointer cannot: it is read once, it executes
+// nothing, and being weak it is null in a program that has no C library --- in
+// which case this implementation supplied `_start' and recorded the vectors
+// there, and this path is not taken.
+extern "C" char** environ __attribute__((weak));
+
+// The initial stack, whose shape is the ELF ABI's rather than any library's:
+//
+//     argc  argv[0] .. argv[argc-1]  NULL  envp[0] .. NULL  auxv...
+//
+// so from `envp' the argument vector is reached by walking back over its
+// terminator. The walk is CHECKED and not trusted: the count found in the slot
+// below argv[0] must equal the number of entries actually there, which a run of
+// unrelated stack words does not satisfy. Where it does not hold, nothing is
+// recorded and the program is told it has no arguments -- which is an answer,
+// and is what clause 7.7 asks of an implementation that cannot know.
+bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
+    char** e = environ;
+    if (e == nullptr || e[-1] != nullptr) return false;
+    for (long k = 0; k <= 65536; ++k) {
+        auto* slot = reinterpret_cast<long*>(e - 2 - k);
+        if (*slot != k) continue;
+        char** candidate = e - 1 - k;
+        bool holds = true;
+        for (long i = 0; i < k && holds; ++i) if (candidate[i] == nullptr) holds = false;
+        if (!holds || candidate[k] != nullptr) continue;
+        *argv_out = candidate; *argc_out = static_cast<int>(k); *envp_out = e;
+        return true;
+    }
+    return false;
+}
+
 [[gnu::constructor(101)]] void capture(int argc, char** argv, char** envp) {
-    if (okl::g_argv == nullptr) okl::record(argc, argv, envp);
+    if (okl::g_argv != nullptr) return;
+    if (plausible(argc, argv, envp)) { okl::record(argc, argv, envp); return; }
+    char** rargv = nullptr; char** renvp = nullptr; int rargc = 0;
+    if (recover(&rargv, &rargc, &renvp)) okl::record(rargc, rargv, renvp);
 }
 }  // namespace
 
