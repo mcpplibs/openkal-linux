@@ -8,7 +8,7 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.9.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.7.0"
+openkal-linux = "0.7.1"
 ```
 
 ## Why it does not use a C library
