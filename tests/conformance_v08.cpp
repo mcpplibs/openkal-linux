@@ -190,6 +190,75 @@ void space_section() {
     kal_process_close(p.p);
 }
 
+// A BOUNDED TRANSFER WAITS UPON THE STREAM IT THEN TRANSFERS UPON.
+//
+// This is the observation that was missing while the two operations it examines
+// waited upon the descriptor below the one they transferred upon. Nothing else
+// in this file reached them: the two observations in timeout_section below are
+// of an accept, whose handle is owned and was decoded correctly, and of a
+// zero-length write, which returns before it waits.
+//
+// WHY IT MAKES SIXTEEN CHANNELS AND NOT ONE. Under the defect the wait was
+// performed upon descriptor N-1, and whether that expires depends on what
+// occupies N-1. For a channel made after another, N-1 is the previous channel's
+// writing end, upon which input is never reported, so the read expires while
+// bytes sit in the stream that was asked for. One channel would be answering
+// about whichever descriptor happened to precede it; sixteen make the answer a
+// property of the implementation rather than of the process that ran it.
+//
+// AND WHY IT RUNS FIRST. The mistaken decode succeeded only while the
+// generation recorded for N-1 was still zero, so it corrected itself for every
+// index at which an owned handle had already been released. Placed after the
+// sections that create and release listeners and datagrams, this would have
+// examined reused descriptors and held upon the defect.
+//
+// The count is reported rather than the first failure. Sixteen distinguishes a
+// correct implementation from one that answers about a neighbouring descriptor;
+// the first failure alone would not say which.
+void timeout_stream_section() {
+    constexpr int n = 16;
+    kal_stream mine[n]{}, theirs[n]{};
+    int made = 0;
+
+    for (; made < n; ++made) {
+        if (kal_process_channel(&mine[made], &theirs[made]) != kal_ok) break;
+        const char byte = 'x';
+        if (kal_stream_write(theirs[made], &byte, 1) != 1) break;
+    }
+    check(made == n, "sixteen channels are created and each is written to");
+
+    int transferred = 0;
+    for (int i = 0; i < made; ++i) {
+        char buf[1] = {};
+        // One millisecond. Every one of these streams has a byte waiting, so a
+        // correct implementation does not reach the bound at all; the bound is
+        // present so that a wait upon the wrong descriptor ends the run rather
+        // than hanging it.
+        if (kal::timeout::read(mine[i], buf, 1, 1000000) == 1 && buf[0] == 'x')
+            ++transferred;
+    }
+    if (transferred != made)
+        std::printf("  %d of %d bounded reads transferred\n", transferred, made);
+    check(transferred == made,
+          "a bounded read of a stream that has bytes waiting transfers them");
+
+    // The mirror. A stream with nothing in it must expire, and must expire
+    // rather than transfer a byte belonging to another stream.
+    kal_stream empty_mine{}, empty_theirs{};
+    if (kal_process_channel(&empty_mine, &empty_theirs) == kal_ok) {
+        char buf[1] = {};
+        check(kal::timeout::read(empty_mine, buf, 1, 1000000) == -kal_err_again,
+              "a bounded read of a stream with nothing waiting expires");
+        kal_process_channel_close(empty_theirs);
+        kal_process_channel_close(empty_mine);
+    }
+
+    for (int i = 0; i < made; ++i) {
+        kal_process_channel_close(theirs[i]);
+        kal_process_channel_close(mine[i]);
+    }
+}
+
 // openkal.timeout
 void timeout_section() {
     check(kal_timeout_granularity() > 0,
@@ -257,6 +326,12 @@ void process_additions_section() {
 }  // namespace
 
 int main() {
+    // FIRST, AND THE ORDER IS LOAD-BEARING. The comment above this section
+    // records why: it examines a defect that corrects itself for any descriptor
+    // index at which an owned handle has already been released, so running it
+    // after the sections that make and release listeners would hold upon the
+    // defect it exists to detect.
+    timeout_stream_section();
     process_additions_section();
     terminal_section();
     net_section();
