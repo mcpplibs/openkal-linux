@@ -275,6 +275,33 @@ int kal_fs_set_modified(kal_file f, kal_u64 modified_ns) {
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
+// The same, upon a NAME. Version 0.10.
+//
+// ⚠️⚠️ ADDED BECAUSE THE FORM ABOVE CANNOT REACH A DIRECTORY, AND A CONSUMER
+// PAID FOR THAT. `kal_fs_set_modified' takes a `kal_file'; a directory is opened
+// as a `kal_dir'; there was no third thing. openkal-musl reached a lock
+// directory's timestamp by opening the directory for READING and setting the
+// time on that, which worked here and was outside anything the interface said.
+// This is the stated route.
+int kal_fs_set_modified_at(kal_dir base, const char* name, kal_uintptr len,
+                           kal_u64 modified_ns) {
+    const int b = okl::unpack(base.h);
+    if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
+    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+
+    constexpr okl_i64 utime_omit = 0x3ffffffe;
+    okl::ktimespec times[2];
+    times[0].sec = 0;  times[0].nsec = utime_omit;
+    times[1].sec  = static_cast<okl_i64>(modified_ns / 1000000000u);
+    times[1].nsec = static_cast<okl_i64>(modified_ns % 1000000000u);
+
+    // Resolves, because opening resolves and this is stated to agree with it.
+    const okl_long r = okl::sys(okl::nr_utimensat, b,
+                                reinterpret_cast<okl_long>(t.buf),
+                                reinterpret_cast<okl_long>(times), 0);
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
 int kal_fs_mkdir(kal_dir base, const char* name, kal_uintptr len) {
     const int b = okl::unpack(base.h);
     if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
@@ -379,8 +406,15 @@ int kal_fs_list_next(kal_dir, kal_uintptr* iter,
 // them.
 kal_uintptr kal_fs_props(kal_dir d) {
     const int fd = okl::unpack(d.h);
+    // ⭐ LOCKS AND CAPACITY ARE IN THE CONSERVATIVE SET, and that is a claim
+    // about this kernel rather than about the volume: an open-file lock and
+    // `fstatfs' are answered by the VFS for every format beneath it, including
+    // the read-only ones --- a lock excludes writers a read-only volume does not
+    // have, which is a true answer and not a useful one. A format that could not
+    // would have to be excluded by name here, and this kernel has none.
     const kal_uintptr conservative =
-        KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_ATOMIC_RENAME;
+        KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_ATOMIC_RENAME
+        | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
     if (fd < 0) return 0;
 
     okl::kstatfs sf{};
@@ -399,9 +433,10 @@ kal_uintptr kal_fs_props(kal_dir d) {
         // rename cannot be atomic because there is no rename.
         case okl::fs_squashfs: case okl::fs_erofs:
             return KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_CASE_SENSITIVE
-                 | KAL_FS_PROP_LINKS;
+                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
         case okl::fs_iso9660:
-            return KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_CASE_SENSITIVE;
+            return KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_CASE_SENSITIVE
+                 | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
 
         // The FAT family stores neither a case distinction nor a node that
         // names another. `symlink' on such a volume reports EPERM, and this is
@@ -416,6 +451,82 @@ kal_uintptr kal_fs_props(kal_dir d) {
         default:
             return conservative;
     }
+}
+
+// --- exclusion upon a range of a file --------------------------------------
+//
+// ⭐⭐ THE OPEN-FILE FORM, AND THE DIFFERENCE IS THE WHOLE REASON THIS IS
+// WORTH SPECIFYING.
+//
+// This kernel's oldest record lock is held by the PROCESS and is released as
+// soon as that process closes ANY descriptor for the node --- so a library that
+// opened one file twice destroyed its own lock, and two parts of one program
+// could not exclude each other at all. openkal states that the holder is the
+// `kal_file', which is exactly what `F_OFD_*' describes: the lock belongs to the
+// open file description and ends when the last descriptor for it closes, and
+// when the program ends however it ends.
+//
+// ⚠️ Releasing on death is the half a caller cannot build for itself. Exclusion
+// it can: `KAL_OPEN_EXCLUSIVE' and a name beside the file. What nothing above
+// this line can do is release that name when its holder dies, so a program that
+// ended abnormally while holding one would be locked out of its own file for
+// ever.
+static int lock_range(kal_file f, kal_u64 start, kal_u64 len,
+                      short type, bool wait) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0) return kal_err_invalid;
+
+    okl::kflock fl{};
+    fl.l_type   = type;
+    fl.l_whence = okl::seek_set;
+    fl.l_start  = static_cast<okl_i64>(start);
+    // openkal spells "to the end, however far that comes to be" as zero, and so
+    // does this kernel. The two agree, so nothing is translated.
+    fl.l_len    = static_cast<okl_i64>(len);
+
+    const okl_long cmd = wait ? okl::f_ofd_setlkw : okl::f_ofd_setlk;
+    okl_long r;
+    do {
+        r = okl::sys(okl::nr_fcntl, fd, cmd, reinterpret_cast<okl_long>(&fl));
+    } while (okl::interrupted(r));
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
+int kal_fs_lock(kal_file f, kal_u64 start, kal_u64 len, kal_uintptr mode) {
+    const bool shared    = (mode & KAL_LOCK_SHARED)    != 0;
+    const bool exclusive = (mode & KAL_LOCK_EXCLUSIVE) != 0;
+    // One of the two, and not both and not neither: a caller that asked for
+    // both asked for something no environment has, and one that asked for
+    // neither did not say what it wanted.
+    if (shared == exclusive) return kal_err_invalid;
+    return lock_range(f, start, len,
+                      shared ? okl::lock_read : okl::lock_write,
+                      (mode & KAL_LOCK_WAIT) != 0);
+}
+
+int kal_fs_unlock(kal_file f, kal_u64 start, kal_u64 len) {
+    // Never waits: releasing is not a request another holder can block.
+    return lock_range(f, start, len, okl::lock_unlock, false);
+}
+
+// --- how much the volume holds ----------------------------------------------
+int kal_fs_capacity(kal_dir d, kal_u64* total, kal_u64* available) {
+    const int fd = okl::unpack(d.h);
+    if (fd < 0) return kal_err_invalid;
+
+    okl::kstatfs sf{};
+    const okl_long r = okl::sys(okl::nr_fstatfs, fd, reinterpret_cast<okl_long>(&sf));
+    if (okl::failed(r)) return okl::translate(r);
+
+    // In bytes, because that is what the interface says and what a caller of it
+    // wants; this kernel reports blocks and the size of one.
+    const kal_u64 unit = static_cast<kal_u64>(sf.f_bsize);
+    // ⚠️ `f_bavail' AND NOT `f_bfree'. The second counts blocks the volume has,
+    // including those only a privileged writer may reach; the first counts the
+    // ones THIS program could actually use, which is the question asked.
+    if (total)     *total     = static_cast<kal_u64>(sf.f_blocks) * unit;
+    if (available) *available = static_cast<kal_u64>(sf.f_bavail) * unit;
+    return kal_ok;
 }
 
 // Nodes whose content is another name.

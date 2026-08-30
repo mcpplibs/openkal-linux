@@ -225,6 +225,90 @@ int kal_process_spawn(kal_dir base,
     return kal_ok;
 }
 
+// The same, with the started program's lifetime bound to this one's. 0.10.
+//
+// ⭐⭐ WHY THIS EXISTS, AND IT IS NOT A CONVENIENCE.
+//
+// A C library asked for `execve' composes it out of what this interface has:
+// start the program, wait for it, end with its status. That composition leaves
+// THREE images where a system with the operation has two --- the caller, a copy
+// that waits, and the program --- and `kal_process_terminate' upon the identifier
+// the caller holds reaches the WAITER. Measured with a host as control: identical
+// status words, opposite outcomes; the caller is told the program died on the
+// signal it sent, while the program runs to completion, unsupervised.
+// openkal-linux#13.
+//
+// ⚠️ THE BINDING IS SET IN THE STARTED IMAGE AND NOT FROM HERE, which is why it
+// is a second spawn rather than an operation applied to a handle. This kernel's
+// facility answers "end this context when the one that started it ends", and only
+// that context can ask for it.
+//
+// ⚠️ AND IT IS ASKED FOR BEFORE THE REPLACEMENT AND CHECKED AFTER: the setting
+// survives the replacement, but the parent could have ended in between --- in
+// which case the signal has already been delivered and there is nothing to
+// notice. Reading the parent's identity after arming closes that window: if it
+// is no longer the one that armed, this image ends now rather than becoming the
+// orphan the caller asked not to have.
+int kal_process_spawn_bound(kal_dir base,
+                            const char* path, kal_uintptr path_len,
+                            const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
+                            const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
+                            const kal_spawn_streams* streams,
+                            kal_process* out) {
+    const int b = okl::unpack(base.h);
+    if (b < 0 || out == nullptr) return kal_err_invalid;
+    if (!okl::acceptable(path, path_len)) return kal_err_invalid;
+    okl::terminated p(path, path_len);
+    if (!p.ok) return kal_err_invalid;
+
+    vector args, envs;
+    if (!args.build(argv, argv_lens, argc)) return kal_err_no_memory;
+    if (!envs.build(envp, envp_lens, envc)) return kal_err_no_memory;
+
+    const okl_long in = streams ? static_cast<okl_long>(streams->in.h)  : 0;
+    const okl_long ou = streams ? static_cast<okl_long>(streams->out.h) : 0;
+    const okl_long er = streams ? static_cast<okl_long>(streams->err.h) : 0;
+
+    const okl_long mine = okl::sys(okl::nr_getpid);
+
+    exec_report report;
+    report.open(0);
+
+    const okl_long child = okl::sys(okl::nr_clone, 17 /* SIGCHLD */, 0, 0, 0, 0);
+    if (okl::failed(child)) { report.close_both(); return okl::translate(child); }
+
+    if (child == 0) {
+        if (in != 0) okl::sys(okl::nr_dup3, in, 0, 0);
+        if (ou != 0) okl::sys(okl::nr_dup3, ou, 1, 0);
+        if (er != 0) okl::sys(okl::nr_dup3, er, 2, 0);
+
+        // 9 is SIGKILL: the binding must not be something the started program
+        // can decline, because the caller asked for a program that does not
+        // outlive it and not for one that is invited not to.
+        okl::sys(okl::nr_prctl, okl::pr_set_pdeathsig, 9, 0, 0, 0);
+        // The window: if the caller ended between the clone and the line above,
+        // the signal is already spent and this image would survive it.
+        if (okl::sys(okl::nr_getppid) != mine)
+            okl::sys(okl::nr_exit_group, 127);
+
+        const okl_long why =
+            okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
+                     reinterpret_cast<okl_long>(args.slots),
+                     reinterpret_cast<okl_long>(envs.slots), 0);
+        report.say(why);
+        okl::sys(okl::nr_exit_group, 127);
+        for (;;) { }
+    }
+
+    if (const okl_long why = report.heard()) {
+        reap(child);
+        return okl::translate(why);
+    }
+
+    *out = kal_process{ static_cast<kal_uintptr>(child) };
+    return kal_ok;
+}
+
 // A channel: a pair of streams of which one end is meant to cross a spawn.
 //
 // WHY THIS IS A KERNEL FACILITY AND kal::kit's CHANNEL IS NOT. A started program
@@ -389,7 +473,8 @@ void kal_process_close(kal_process) { }
 kal_uintptr kal_process_props(void) {
     return KAL_PROCESS_PROP_TERMINATE | KAL_PROCESS_PROP_STREAM_PASSING
          | KAL_PROCESS_PROP_EXIT_STATUS
-         | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR;
+         | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
+         | KAL_PROCESS_PROP_BOUND_LIFETIME;
 }
 
 }

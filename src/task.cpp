@@ -222,6 +222,32 @@ kal_uintptr kal_task_current(void) {
     return static_cast<kal_uintptr>(cached);
 }
 
+// How many contexts can run at the same moment. Version 0.10.
+//
+// ⚠️⚠️ ADDED BECAUSE ITS ABSENCE WAS A WRONG ANSWER RATHER THAN A REFUSAL.
+// `KAL_TASK_PROP_PARALLEL' says WHETHER and not HOW MANY, so a C library above
+// had nowhere to look and `hardware_concurrency()' answered 1 with no error ---
+// a program sizing a pool of workers got one worker and no way to know.
+// Measured: 1 through openkal-musl against 32 on the same machine.
+//
+// ⭐ THE SET THIS CONTEXT MAY RUN ON, not the set the machine has. A program
+// confined to two processors is asked to size itself against two; asking the
+// machine would have it size against a number it cannot use.
+kal_uintptr kal_task_parallelism(void) {
+    // The kernel writes a bitmap and reports how many BYTES of it it wrote.
+    unsigned long mask[128] = { 0 };   // 8192 processors, which is this kernel's own bound
+    const okl_long n = okl::sys(okl::nr_sched_getaffinity, 0,
+                                static_cast<okl_long>(sizeof mask),
+                                reinterpret_cast<okl_long>(mask));
+    if (okl::failed(n) || n <= 0) return 0;   // 0 is "cannot say", and is not 1
+
+    kal_uintptr count = 0;
+    const okl_long words = n / static_cast<okl_long>(sizeof(unsigned long));
+    for (okl_long i = 0; i < words; ++i)
+        for (unsigned long bit = mask[i]; bit; bit &= bit - 1) ++count;
+    return count;
+}
+
 // The primitive. It is the operation a caller cannot construct: the comparison
 // and the suspension occur without an intervening opportunity for the value to
 // change unobserved, and only the environment can arrange that.
