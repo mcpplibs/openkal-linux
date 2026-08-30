@@ -91,7 +91,7 @@ enum : okl_long {
     nr_readv = 19, nr_writev = 20, nr_sched_yield = 24, nr_nanosleep = 35,
     nr_getpid = 39, nr_clone = 56, nr_execve = 59, nr_exit = 60, nr_wait4 = 61,
     nr_kill = 62, nr_ftruncate = 77, nr_getcwd = 79, nr_fsync = 74,
-    nr_fcntl = 72,
+    nr_fcntl = 72, nr_prctl = 157, nr_sched_getaffinity = 204, nr_getppid = 110,
     nr_arch_prctl = 158, nr_gettid = 186, nr_futex = 202,
     nr_getdents64 = 217, nr_set_tid_address = 218, nr_clock_gettime = 228,
     nr_clock_getres = 229, nr_exit_group = 231, nr_tgkill = 234,
@@ -180,6 +180,7 @@ enum : okl_long {
     nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226,
     nr_clone = 220, nr_execve = 221, nr_wait4 = 260, nr_renameat = 38,
     nr_dup3 = 24, nr_execveat = 281, nr_dup2 = -1, nr_fcntl = 25,
+    nr_prctl = 167, nr_sched_getaffinity = 123, nr_getppid = 173,
     nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
     nr_getrandom = 278,
     // openkal.net and openkal.datagram
@@ -252,6 +253,26 @@ enum : okl_long {
     // already had there. `dup3' cannot do this: it is told the number, and it
     // closes what is on it.
     f_dupfd_cloexec = 1030,
+
+    // ⭐⭐ THE OPEN-FILE FORM AND NOT THE PROCESS FORM, WHICH IS THE WHOLE
+    // DIFFERENCE.
+    //
+    // This kernel's oldest record lock is held by the PROCESS, and it is
+    // released as soon as that process closes ANY descriptor for the node ---
+    // so a library that opened one file twice destroyed its own lock, and two
+    // parts of one program could not exclude each other at all. openkal states
+    // the holder as the `kal_file', which is exactly what these describe: the
+    // lock belongs to the open file description and ends when the last
+    // descriptor for it closes.
+    f_ofd_getlk = 36, f_ofd_setlk = 37, f_ofd_setlkw = 38,
+
+    // A lock's kind, and where a range begins.
+    lock_read = 0, lock_write = 1, lock_unlock = 2,
+    seek_set = 0,
+
+    // "End this context when the one that started it ends", which is what
+    // binding a started program's lifetime is expressed as here.
+    pr_set_pdeathsig = 1,
 #if defined(__x86_64__)
     o_directory = 0200000, o_nofollow = 0400000,
 #else
@@ -304,6 +325,19 @@ inline bool interrupted(okl_long r) { return r == -e_intr; }
 // What the kernel reports about the volume a descriptor is on. The layout is
 // the kernel's own `struct statfs', which is one layout on every architecture
 // this implementation supports because both are LP64.
+// The kernel's own `struct flock'. One layout on both architectures this
+// implementation builds for: two shorts, padded to eight, then two 64-bit
+// positions and the identifier of a holder this implementation never asks about.
+struct kflock {
+    short    l_type;
+    short    l_whence;
+    int      l_pad;
+    okl_i64  l_start;
+    okl_i64  l_len;
+    int      l_pid;
+    int      l_pad2;
+};
+
 struct kstatfs {
     okl_long f_type;
     okl_long f_bsize;
