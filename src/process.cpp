@@ -446,12 +446,78 @@ void kal_process_job_close(kal_job) { }
 // waited for continues, and this environment collects it when the caller exits.
 void kal_process_close(kal_process) { }
 
+// ⭐⭐ A WORD THE ENVIRONMENT SETS WHEN SOMEBODY HAS ASKED THIS PROGRAM TO END.
+//
+// ⚠️ A HANDLER AND NOT A WAITING CONTEXT, AND THE REASON IS WHICH ONE CAN BE
+// ARMED WITHOUT DISTURBING A PROGRAM THAT NEVER ASKS. Consuming these signals
+// from a context of its own would require them BLOCKED IN EVERY context, and
+// blocking is per-context and inherited: a program that already had contexts
+// running when it first asked would have some that still take the default
+// action, and a program that never asks would have been made unkillable at
+// startup. A disposition is per PROGRAM and can be installed at any moment.
+//
+// The handler does two things, and both are safe to do from one: store a word,
+// and wake whoever waits on it. `kal_task_wait' is what a caller waits with, so
+// the wake is the same operation `kal_task_wake' performs --- issued here as the
+// raw call, because a handler may not enter code that takes a lock.
+//
+// ⚠️ THE RESTORER IS SUPPLIED HERE ON ONE ARCHITECTURE AND BY THE KERNEL ON THE
+// OTHER. On x86_64 a disposition installed without SA_RESTORER faults on return
+// from the handler --- the C library normally supplies the three instructions,
+// and this implementation has no C library beneath it. On aarch64 the kernel
+// supplies it and the flag must NOT be set.
+namespace {
+
+kal_u32 g_stop_word = 0;
+int     g_stop_armed = 0;
+
+#if defined(__x86_64__)
+extern "C" void okl_sigreturn_trampoline(void);
+asm(".globl okl_sigreturn_trampoline\n"
+    "okl_sigreturn_trampoline:\n"
+    "  movq $15, %rax\n"      // rt_sigreturn
+    "  syscall\n");
+constexpr unsigned long sa_restorer_flag = 0x04000000u;   // SA_RESTORER
+#endif
+
+void stop_handler(int) {
+    __atomic_store_n(&g_stop_word, 1u, __ATOMIC_RELEASE);
+    okl::sys(okl::nr_futex, reinterpret_cast<okl_long>(&g_stop_word),
+             1 /* FUTEX_WAKE */, 0x7fffffff, 0, 0, 0);
+}
+
+void arm_one(int signo) {
+    struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act {};
+    act.handler = reinterpret_cast<void*>(&stop_handler);
+#if defined(__x86_64__)
+    act.flags   = sa_restorer_flag;
+    act.restorer = reinterpret_cast<void*>(&okl_sigreturn_trampoline);
+#endif
+    okl::sys(okl::nr_rt_sigaction, signo,
+             reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
+}
+
+}  // namespace
+
+// ⚠️ ARMED ON THE FIRST ENQUIRY AND NOT AT STARTUP. A program that never asks
+// keeps the default action, which is what every program that has never heard of
+// this operation expects --- and it is the only arrangement under which adding
+// this operation changes nothing for anyone who does not use it.
+const kal_u32* kal_process_stop_requested(void) {
+    if (!__atomic_exchange_n(&g_stop_armed, 1, __ATOMIC_ACQ_REL)) {
+        arm_one(15);   // SIGTERM
+        arm_one(2);    // SIGINT
+    }
+    return &g_stop_word;
+}
+
 kal_uintptr kal_process_props(void) {
     return KAL_PROCESS_PROP_TERMINATE | KAL_PROCESS_PROP_STREAM_PASSING
          | KAL_PROCESS_PROP_EXIT_STATUS
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
-         | KAL_PROCESS_PROP_JOB;
+         | KAL_PROCESS_PROP_JOB
+         | KAL_PROCESS_PROP_STOP_REQUESTED;
 }
 
 }
