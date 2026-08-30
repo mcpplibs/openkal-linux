@@ -91,6 +91,7 @@ enum : okl_long {
     nr_readv = 19, nr_writev = 20, nr_sched_yield = 24, nr_nanosleep = 35,
     nr_getpid = 39, nr_clone = 56, nr_execve = 59, nr_exit = 60, nr_wait4 = 61,
     nr_kill = 62, nr_ftruncate = 77, nr_getcwd = 79, nr_fsync = 74,
+    nr_fcntl = 72,
     nr_arch_prctl = 158, nr_gettid = 186, nr_futex = 202,
     nr_getdents64 = 217, nr_set_tid_address = 218, nr_clock_gettime = 228,
     nr_clock_getres = 229, nr_exit_group = 231, nr_tgkill = 234,
@@ -178,7 +179,7 @@ enum : okl_long {
     nr_sched_yield = 124, nr_kill = 129, nr_tgkill = 131, nr_gettid = 178,
     nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226,
     nr_clone = 220, nr_execve = 221, nr_wait4 = 260, nr_renameat = 38,
-    nr_dup3 = 24, nr_execveat = 281, nr_dup2 = -1,
+    nr_dup3 = 24, nr_execveat = 281, nr_dup2 = -1, nr_fcntl = 25,
     nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
     nr_getrandom = 278,
     // openkal.net and openkal.datagram
@@ -244,6 +245,13 @@ enum : okl_long {
     o_rdonly = 0, o_wronly = 1, o_rdwr = 2,
     o_creat = 0100, o_excl = 0200, o_trunc = 01000, o_append = 02000,
     o_cloexec = 02000000,
+
+    // ⭐ THE LOWEST FREE DESCRIPTOR AT OR ABOVE A BOUND, which is the one
+    // primitive that moves a descriptor out of the way WITHOUT NAMING the
+    // number it moves to --- and therefore without closing whatever a caller
+    // already had there. `dup3' cannot do this: it is told the number, and it
+    // closes what is on it.
+    f_dupfd_cloexec = 1030,
 #if defined(__x86_64__)
     o_directory = 0200000, o_nofollow = 0400000,
 #else
