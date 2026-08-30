@@ -489,7 +489,22 @@ static int lock_range(kal_file f, kal_u64 start, kal_u64 len,
     do {
         r = okl::sys(okl::nr_fcntl, fd, cmd, reinterpret_cast<okl_long>(&fl));
     } while (okl::interrupted(r));
-    return okl::failed(r) ? okl::translate(r) : kal_ok;
+    if (!okl::failed(r)) return kal_ok;
+
+    // ⚠️⚠️ TWO VALUES MEAN ONE THING HERE, AND openkal NAMES ONE OF THEM.
+    //
+    // The standard this call comes from says a range another holder has is
+    // reported as EITHER of two values, and leaves the choice to the system ---
+    // so a caller must accept both and an implementation of openkal must not
+    // pass that choice on. openkal says `kal_err_again', which is the answer a
+    // caller polls upon; the other value translates to `permission', which a
+    // caller reads as "asking again will not help" and acts upon by stopping.
+    //
+    // ⭐ Narrowed to the attempt that does NOT wait, because that is the only
+    // one for which the two values carry this meaning. A permission failure on
+    // any other path keeps its own answer.
+    if (!wait && (-r == okl::e_acces || -r == okl::e_again)) return kal_err_again;
+    return okl::translate(r);
 }
 
 int kal_fs_lock(kal_file f, kal_u64 start, kal_u64 len, kal_uintptr mode) {
