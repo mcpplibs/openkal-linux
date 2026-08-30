@@ -18,7 +18,7 @@ authors     = ["mcpplibs"]
 repo        = "https://github.com/mcpplibs/openkal-linux"
 
 [dependencies]
-openkal = { path = "/home/speak/workspace/github/mcpplibs/openkal" }
+openkal = "0.10.0"
 
 # The package contributes definitions and no modules. The interface it
 # implements is declared by the specification package, which this package
