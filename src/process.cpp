@@ -200,11 +200,34 @@ int kal_process_spawn(kal_dir base,
         if (in != 0) okl::sys(okl::nr_dup3, in, 0, 0);
         if (ou != 0) okl::sys(okl::nr_dup3, ou, 1, 0);
         if (er != 0) okl::sys(okl::nr_dup3, er, 2, 0);
-        // The started program's working directory is the directory supplied
-        // here, expressed by naming the program relative to it. There is no
-        // operation that changes a working directory afterwards, because a
-        // working directory that can be changed is shared mutable state
-        // between execution contexts.
+        // ⚠️⚠️ THIS COMMENT USED TO CLAIM A PROPERTY THIS CODE DOES NOT HAVE.
+        // It said the started program's working directory is the directory
+        // supplied here. It is not. `b' is the directory the NAME resolves
+        // against and nothing more --- `execveat' takes a dirfd to resolve
+        // `p.buf', and resolving a name is not entering a directory. The
+        // started program's working directory is this implementation's own,
+        // whatever that happens to be, inherited across the clone above.
+        //
+        // ⭐ Found by a consumer's test rather than by reading, which is the
+        // point: `chdir' then start a program, ask it for its working
+        // directory, and it answers the directory the caller left --- against
+        // a host as control, which answers the one the caller entered.
+        //
+        // ⇒ AND IT IS NOT FIXABLE HERE. An `fchdir(b)' before the replacement
+        // would make the sentence true and the behaviour no better: `b' is
+        // whichever preopen the name resolved under --- for a program named
+        // `/usr/bin/sh' that is the root --- so the started program would get
+        // an arbitrary directory instead of a different arbitrary directory.
+        // Naming the program and naming where it runs are two directories, and
+        // openkal has an argument for one of them. openkal-musl's `chdir'
+        // therefore rebinds its own table and cannot do better; the interface
+        // has no operation that carries the second directory across a spawn.
+        //
+        // There is deliberately no operation that changes a working directory
+        // afterwards, because a working directory that can be changed is
+        // shared mutable state between execution contexts. That refusal is
+        // sound and is NOT what is missing --- what is missing is a way to say,
+        // at the moment of starting, which directory the program starts in.
         const okl_long why =
             okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
                      reinterpret_cast<okl_long>(args.slots),
