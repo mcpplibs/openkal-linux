@@ -100,6 +100,38 @@ bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
     return false;
 }
 
+// ⚠️⚠️ A PROGRAM ABOVE openkal SHALL NOT BE ENDED BY SOMETHING openkal NEVER
+// TOLD IT ABOUT, AND WITHOUT THIS LINE ONE WAS.
+//
+// openkal defines no signals. `kal_stream_write' is required to REPORT that the
+// far end of a stream is gone --- there is a condition for it --- and this kernel
+// instead delivers SIGPIPE, whose default action ends the program. So a program
+// that wrote to a closed stream did not receive the error the interface promises;
+// it stopped, with a status no operation here produced and no wording anywhere in
+// the specification.
+//
+// ⭐ MEASURED THROUGH A CONSUMER, AND THE SHAPE IS WHY IT TOOK SO LONG TO SEE. A
+// C library above this one answers `signal(SIGPIPE, SIG_IGN)' --- openkal has no
+// signals, so the library has nothing to set and truthfully reports success. The
+// program is then killed anyway, four layers below the call it made to prevent
+// exactly that. Exit 141 in a test whose own assertions never printed.
+//
+// ⇒ Ignored HERE and not there, because here is the only place that can: the
+// interface has no operation a C library could use to say it. The write then
+// fails with EPIPE, which `kal_stream_write' translates and reports, which is
+// what the interface said would happen all along.
+//
+// ⚠️ NOT A POLICY CHOICE ABOUT SIGNALS IN GENERAL. This is the one signal an
+// ordinary openkal operation provokes; the rest are left exactly as this program
+// was started with.
+[[gnu::constructor(101)]] void quiet_the_signal_openkal_cannot_report() {
+    // struct k_sigaction as this kernel takes it: handler, flags, restorer, mask.
+    struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; }
+        ignore{ reinterpret_cast<void*>(1) /* SIG_IGN */, 0, nullptr, 0 };
+    okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
+             reinterpret_cast<okl_long>(&ignore), 0, sizeof ignore.mask);
+}
+
 [[gnu::constructor(101)]] void capture(int argc, char** argv, char** envp) {
     if (okl::g_argv != nullptr) return;
     if (plausible(argc, argv, envp)) { okl::record(argc, argv, envp); return; }

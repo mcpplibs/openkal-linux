@@ -53,6 +53,11 @@ int main() {
     check(have_root, "a directory covering the file system is supplied");
 
     if (have_root) {
+        // How every start below is described. `work' is the same directory as
+        // `base', which is what a caller that does not care about the working
+        // directory passes --- openkal has no ambient one for a default to mean.
+        const kal_spawn how{ slash, slash, nullptr, nullptr, 0, 0 };
+
         // The program that succeeds and the program that fails are at
         // different places on different systems. The test locates them rather
         // than assuming, because assuming would make it a test of one system.
@@ -66,7 +71,7 @@ int main() {
         const kal_uintptr lens[] = { 7 };
         int rc = kal_err_invalid;
         for (int i = 0; i < 2 && rc != kal_ok; ++i)
-            rc = kal_process_spawn(slash, true_paths[i], true_lens[i], argv, lens, 1,
+            rc = kal_process_spawn(&how, true_paths[i], true_lens[i], argv, lens, 1,
                                    nullptr, nullptr, 0, nullptr, &p);
         check(rc == kal_ok, "a program is started");
         if (rc == kal_ok) {
@@ -83,7 +88,7 @@ int main() {
         const char* qargv[] = { "openkal" };
         int qrc = kal_err_invalid;
         for (int i = 0; i < 2 && qrc != kal_ok; ++i)
-            qrc = kal_process_spawn(slash, false_paths[i], false_lens[i], qargv, lens, 1,
+            qrc = kal_process_spawn(&how, false_paths[i], false_lens[i], qargv, lens, 1,
                                     nullptr, nullptr, 0, nullptr, &q);
         if (qrc == kal_ok) {
             int status = -1, terminated = -1;
@@ -114,7 +119,7 @@ int main() {
         const kal_uintptr rlens[] = { 22, 2, script_len };
         int rrc = kal_err_invalid;
         for (int i = 0; i < 2 && rrc != kal_ok; ++i)
-            rrc = kal_process_spawn(slash, sh_paths[i], sh_lens[i], rargv, rlens, 3,
+            rrc = kal_process_spawn(&how, sh_paths[i], sh_lens[i], rargv, rlens, 3,
                                     nullptr, nullptr, 0, nullptr, &r);
         check(rrc == kal_ok, "a shell is started");
         if (rrc == kal_ok) {
@@ -128,7 +133,9 @@ int main() {
 
     // A name that ascends is refused here as it is in the file system.
     kal_process bad{};
-    check(kal_process_spawn(kal::fs::working(), "../bin/true", 11,
+    const kal_spawn escape{ kal::fs::working(), kal::fs::working(),
+                            nullptr, nullptr, 0, 0 };
+    check(kal_process_spawn(&escape, "../bin/true", 11,
                             nullptr, nullptr, 0, nullptr, nullptr, 0, nullptr, &bad)
           != kal_ok, "an ascending program name is refused");
 

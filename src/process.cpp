@@ -159,40 +159,72 @@ inline void reap(okl_long child) {
 
 extern "C" {
 
-int kal_process_spawn(kal_dir base,
+// Starting a program. ⭐ ONE FUNCTION SINCE 0.11, AND THE SAVING IS NOT ONLY IN
+// THE HEADER: this file used to hold THREE bodies of sixty lines that differed
+// by four. Every fix to the shared part --- and there have been several, the
+// exec-report pipe among them --- had to be made three times or be made once and
+// be wrong twice.
+//
+// The modifiers are now positions in `how': a working directory, a set of
+// grants, and two flags. They compose, which the three declarations could not
+// do: there was no way to grant directories AND bind a lifetime, and no way at
+// all to say the two things a shell runner needs together.
+int kal_process_spawn(const kal_spawn* how,
                       const char* path, kal_uintptr path_len,
                       const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
                       const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
                       const kal_spawn_streams* streams,
                       kal_process* out) {
-    const int b = okl::unpack(base.h);
-    if (b < 0 || out == nullptr) return kal_err_invalid;
+    if (how == nullptr || out == nullptr) return kal_err_invalid;
+
+    const int b = okl::unpack(how->base.h);
+    const int w = okl::unpack(how->work.h);
+    if (b < 0 || w < 0) return kal_err_invalid;
     if (!okl::acceptable(path, path_len)) return kal_err_invalid;
+    if (how->grant_count > 0 && how->grants == nullptr) return kal_err_invalid;
+
+    // ⚠️ REFUSED BEFORE ANYTHING IS STARTED, not after. A caller that asked for a
+    // bound lifetime and received a program without one has been given a program
+    // that outlives it --- which is the failure the flag exists to remove --- so an
+    // unclaimed position is an error and not a thing to proceed without.
+    if (how->flags & ~KAL_SPAWN_BOUND_LIFETIME) return kal_err_not_supported;
+
     okl::terminated p(path, path_len);
     if (!p.ok) return kal_err_invalid;
 
-    // The vector is passed unaltered. Clause 7.6: argv[0] is the name the
-    // started program observes as its own, and it is the caller's to choose ---
-    // the started program reads it through kal_env_arg(0), so a caller that did
-    // not supply it could not predict what the program would read.
     vector args, envs;
     if (!args.build(argv, argv_lens, argc)) return kal_err_no_memory;
     if (!envs.build(envp, envp_lens, envc)) return kal_err_no_memory;
 
-    const okl_long in  = streams ? static_cast<okl_long>(streams->in.h)  : 0;
-    const okl_long ou  = streams ? static_cast<okl_long>(streams->out.h) : 0;
-    const okl_long er  = streams ? static_cast<okl_long>(streams->err.h) : 0;
+    // Resolved before the duplication, because a failure after it would leave a
+    // child to be reaped and a caller with an error it cannot act upon.
+    constexpr kal_uintptr max_grants = 16;
+    if (how->grant_count > max_grants) return kal_err_invalid;
+    int granted[max_grants];
+    for (kal_uintptr i = 0; i < how->grant_count; ++i) {
+        granted[i] = okl::unpack(how->grants[i].dir.h);
+        if (granted[i] < 0) return kal_err_invalid;
+    }
 
-    // Opened before the duplication, so that the duplicate inherits it. A pipe
-    // that cannot be made is not a reason to refuse the spawn: this answers as
-    // it did before the channel existed.
+    const okl_long in = streams ? static_cast<okl_long>(streams->in.h)  : 0;
+    const okl_long ou = streams ? static_cast<okl_long>(streams->out.h) : 0;
+    const okl_long er = streams ? static_cast<okl_long>(streams->err.h) : 0;
+
+    const bool bind = (how->flags & KAL_SPAWN_BOUND_LIFETIME) != 0;
+
+    // ⭐ THE UNIT, WHOSE IDENTITY HERE IS A PROCESS GROUP'S --- which is to say,
+    // the identifier of whichever program formed it first. `join' is zero for the
+    // first member, and the child then makes the group its own; a later member is
+    // given the number to join.
+    const okl_long join = how->job ? static_cast<okl_long>(how->job->h) : 0;
+    const bool     unit = how->job != nullptr;
+
+    const okl_long mine = bind ? okl::sys(okl::nr_getpid) : 0;
+
+    // The bound is 3 + grant_count, because the placements below reach that far.
     exec_report report;
-    report.open(0);
+    report.open(how->grant_count);
 
-    // The image is duplicated and then replaced. openkal has no operation that
-    // duplicates the calling image, and this is why: the duplicate is not a
-    // resource the caller receives, it exists for the length of two system
-    // calls, and no environment without it could be asked to reproduce it.
     const okl_long child = okl::sys(okl::nr_clone, 17 /* SIGCHLD */, 0, 0, 0, 0);
     if (okl::failed(child)) { report.close_both(); return okl::translate(child); }
 
@@ -200,34 +232,53 @@ int kal_process_spawn(kal_dir base,
         if (in != 0) okl::sys(okl::nr_dup3, in, 0, 0);
         if (ou != 0) okl::sys(okl::nr_dup3, ou, 1, 0);
         if (er != 0) okl::sys(okl::nr_dup3, er, 2, 0);
-        // ⚠️⚠️ THIS COMMENT USED TO CLAIM A PROPERTY THIS CODE DOES NOT HAVE.
-        // It said the started program's working directory is the directory
-        // supplied here. It is not. `b' is the directory the NAME resolves
-        // against and nothing more --- `execveat' takes a dirfd to resolve
-        // `p.buf', and resolving a name is not entering a directory. The
-        // started program's working directory is this implementation's own,
-        // whatever that happens to be, inherited across the clone above.
+
+        // ⚠️ dup3 REFUSES A DUPLICATION ONTO ITSELF, which the ordinary case
+        // reaches whenever a granted directory already occupies the number it
+        // is destined for. Refusing there is correct of dup3 --- the flags could
+        // not be applied --- and here it means the descriptor is already in
+        // place, so it is left alone rather than treated as a failure.
+        for (kal_uintptr i = 0; i < how->grant_count; ++i) {
+            const okl_long want = static_cast<okl_long>(3 + i);
+            if (granted[i] != want)
+                okl::sys(okl::nr_dup3, granted[i], want, 0);
+        }
+
+        // ⭐ THE DIRECTORY THE PROGRAM RUNS IN, AND THIS LINE IS THE WHOLE OF IT.
         //
-        // ⭐ Found by a consumer's test rather than by reading, which is the
-        // point: `chdir' then start a program, ask it for its working
-        // directory, and it answers the directory the caller left --- against
-        // a host as control, which answers the one the caller entered.
+        // `execveat' below takes `b' as a dirfd, but that only RESOLVES the
+        // name --- resolving a name is not entering a directory, which is what
+        // the comment here used to get wrong. Until 0.11 there was no second
+        // directory to enter, and a started program ran wherever this
+        // implementation happened to be.
         //
-        // ⇒ AND IT IS NOT FIXABLE HERE. An `fchdir(b)' before the replacement
-        // would make the sentence true and the behaviour no better: `b' is
-        // whichever preopen the name resolved under --- for a program named
-        // `/usr/bin/sh' that is the root --- so the started program would get
-        // an arbitrary directory instead of a different arbitrary directory.
-        // Naming the program and naming where it runs are two directories, and
-        // openkal has an argument for one of them. openkal-musl's `chdir'
-        // therefore rebinds its own table and cannot do better; the interface
-        // has no operation that carries the second directory across a spawn.
-        //
-        // There is deliberately no operation that changes a working directory
-        // afterwards, because a working directory that can be changed is
-        // shared mutable state between execution contexts. That refusal is
-        // sound and is NOT what is missing --- what is missing is a way to say,
-        // at the moment of starting, which directory the program starts in.
+        // ⚠️ A FAILURE HERE MUST NOT REACH `execveat'. Running the right program
+        // in the wrong directory is precisely the silent wrongness this exists to
+        // remove, so it is reported through the same pipe an exec failure uses.
+        if (const okl_long e = okl::sys(okl::nr_fchdir, w); okl::failed(e)) {
+            report.say(e);
+            okl::sys(okl::nr_exit_group, 127);
+            for (;;) { }
+        }
+
+        // ⭐ THE UNIT, ENTERED HERE AND NOT FROM THE PARENT: the parent's own
+        // `setpgid' on this child races the replacement below and loses once the
+        // program has been replaced. Zero means "your own", which is how a group
+        // comes into existence at all --- there is nothing to create beforehand,
+        // which is why the interface reports the identity rather than taking it.
+        if (unit) okl::sys(okl::nr_setpgid, 0, join);
+
+        if (bind) {
+            // 9 is SIGKILL: the binding must not be something the started program
+            // can decline, because the caller asked for a program that does not
+            // outlive it and not for one that is invited not to.
+            okl::sys(okl::nr_prctl, okl::pr_set_pdeathsig, 9, 0, 0, 0);
+            // The window: if the caller ended between the clone and the line
+            // above, the signal is already spent and this image would survive it.
+            if (okl::sys(okl::nr_getppid) != mine)
+                okl::sys(okl::nr_exit_group, 127);
+        }
+
         const okl_long why =
             okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
                      reinterpret_cast<okl_long>(args.slots),
@@ -244,89 +295,11 @@ int kal_process_spawn(kal_dir base,
         return okl::translate(why);
     }
 
-    *out = kal_process{ static_cast<kal_uintptr>(child) };
-    return kal_ok;
-}
-
-// The same, with the started program's lifetime bound to this one's. 0.10.
-//
-// ⭐⭐ WHY THIS EXISTS, AND IT IS NOT A CONVENIENCE.
-//
-// A C library asked for `execve' composes it out of what this interface has:
-// start the program, wait for it, end with its status. That composition leaves
-// THREE images where a system with the operation has two --- the caller, a copy
-// that waits, and the program --- and `kal_process_terminate' upon the identifier
-// the caller holds reaches the WAITER. Measured with a host as control: identical
-// status words, opposite outcomes; the caller is told the program died on the
-// signal it sent, while the program runs to completion, unsupervised.
-// openkal-linux#13.
-//
-// ⚠️ THE BINDING IS SET IN THE STARTED IMAGE AND NOT FROM HERE, which is why it
-// is a second spawn rather than an operation applied to a handle. This kernel's
-// facility answers "end this context when the one that started it ends", and only
-// that context can ask for it.
-//
-// ⚠️ AND IT IS ASKED FOR BEFORE THE REPLACEMENT AND CHECKED AFTER: the setting
-// survives the replacement, but the parent could have ended in between --- in
-// which case the signal has already been delivered and there is nothing to
-// notice. Reading the parent's identity after arming closes that window: if it
-// is no longer the one that armed, this image ends now rather than becoming the
-// orphan the caller asked not to have.
-int kal_process_spawn_bound(kal_dir base,
-                            const char* path, kal_uintptr path_len,
-                            const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
-                            const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
-                            const kal_spawn_streams* streams,
-                            kal_process* out) {
-    const int b = okl::unpack(base.h);
-    if (b < 0 || out == nullptr) return kal_err_invalid;
-    if (!okl::acceptable(path, path_len)) return kal_err_invalid;
-    okl::terminated p(path, path_len);
-    if (!p.ok) return kal_err_invalid;
-
-    vector args, envs;
-    if (!args.build(argv, argv_lens, argc)) return kal_err_no_memory;
-    if (!envs.build(envp, envp_lens, envc)) return kal_err_no_memory;
-
-    const okl_long in = streams ? static_cast<okl_long>(streams->in.h)  : 0;
-    const okl_long ou = streams ? static_cast<okl_long>(streams->out.h) : 0;
-    const okl_long er = streams ? static_cast<okl_long>(streams->err.h) : 0;
-
-    const okl_long mine = okl::sys(okl::nr_getpid);
-
-    exec_report report;
-    report.open(0);
-
-    const okl_long child = okl::sys(okl::nr_clone, 17 /* SIGCHLD */, 0, 0, 0, 0);
-    if (okl::failed(child)) { report.close_both(); return okl::translate(child); }
-
-    if (child == 0) {
-        if (in != 0) okl::sys(okl::nr_dup3, in, 0, 0);
-        if (ou != 0) okl::sys(okl::nr_dup3, ou, 1, 0);
-        if (er != 0) okl::sys(okl::nr_dup3, er, 2, 0);
-
-        // 9 is SIGKILL: the binding must not be something the started program
-        // can decline, because the caller asked for a program that does not
-        // outlive it and not for one that is invited not to.
-        okl::sys(okl::nr_prctl, okl::pr_set_pdeathsig, 9, 0, 0, 0);
-        // The window: if the caller ended between the clone and the line above,
-        // the signal is already spent and this image would survive it.
-        if (okl::sys(okl::nr_getppid) != mine)
-            okl::sys(okl::nr_exit_group, 127);
-
-        const okl_long why =
-            okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
-                     reinterpret_cast<okl_long>(args.slots),
-                     reinterpret_cast<okl_long>(envs.slots), 0);
-        report.say(why);
-        okl::sys(okl::nr_exit_group, 127);
-        for (;;) { }
-    }
-
-    if (const okl_long why = report.heard()) {
-        reap(child);
-        return okl::translate(why);
-    }
+    // ⚠️ WRITTEN ONLY AFTER THE START HAS SUCCEEDED, and only when the unit was
+    // new. The first member's identifier IS the group's, so this is where the
+    // caller learns it; a later member joins one the caller already holds and
+    // there is nothing to report.
+    if (unit && join == 0) how->job->h = static_cast<kal_uintptr>(child);
 
     *out = kal_process{ static_cast<kal_uintptr>(child) };
     return kal_ok;
@@ -375,89 +348,6 @@ void kal_process_channel_close(kal_stream s) {
     okl::sys(okl::nr_close, fd);
 }
 
-// Starting a program that receives exactly the directories named.
-//
-// THE GRANTS ARE PLACED AS DESCRIPTORS THREE AND UPWARD, which is the
-// arrangement kal_fs_preopen reads them back from. The inverse relationship
-// clause 7.11 describes is therefore between this operation and that one, and
-// it is why the two must agree about the numbering rather than each choosing.
-//
-// A COUNT OF ZERO IS NOT THE SAME AS kal_process_spawn. It starts a program with
-// no preopens at all, which is the whole reason a caller reaches for this
-// operation, so the loop below is not skipped when there is nothing to place ---
-// what matters is that nothing else is inherited either.
-int kal_process_spawn_with(kal_dir base,
-                           const char* path, kal_uintptr path_len,
-                           const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
-                           const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
-                           const kal_spawn_streams* streams,
-                           const kal_preopen* grants, kal_uintptr grant_count,
-                           kal_process* out) {
-    const int b = okl::unpack(base.h);
-    if (b < 0 || out == nullptr) return kal_err_invalid;
-    if (!okl::acceptable(path, path_len)) return kal_err_invalid;
-    if (grant_count > 0 && grants == nullptr) return kal_err_invalid;
-    okl::terminated p(path, path_len);
-    if (!p.ok) return kal_err_invalid;
-
-    vector args, envs;
-    if (!args.build(argv, argv_lens, argc)) return kal_err_no_memory;
-    if (!envs.build(envp, envp_lens, envc)) return kal_err_no_memory;
-
-    // Resolved before the fork, because a failure after it would leave a child
-    // to be reaped and a caller with an error it cannot act upon.
-    constexpr kal_uintptr max_grants = 16;
-    if (grant_count > max_grants) return kal_err_invalid;
-    int granted[max_grants];
-    for (kal_uintptr i = 0; i < grant_count; ++i) {
-        granted[i] = okl::unpack(grants[i].dir.h);
-        if (granted[i] < 0) return kal_err_invalid;
-    }
-
-    const okl_long in = streams ? static_cast<okl_long>(streams->in.h)  : 0;
-    const okl_long ou = streams ? static_cast<okl_long>(streams->out.h) : 0;
-    const okl_long er = streams ? static_cast<okl_long>(streams->err.h) : 0;
-
-    // The bound is 3 + grant_count, because the placements below reach that far.
-    exec_report report;
-    report.open(grant_count);
-
-    const okl_long child = okl::sys(okl::nr_clone, 17 /* SIGCHLD */, 0, 0, 0, 0);
-    if (okl::failed(child)) { report.close_both(); return okl::translate(child); }
-
-    if (child == 0) {
-        if (in != 0) okl::sys(okl::nr_dup3, in, 0, 0);
-        if (ou != 0) okl::sys(okl::nr_dup3, ou, 1, 0);
-        if (er != 0) okl::sys(okl::nr_dup3, er, 2, 0);
-
-        // ⚠️ dup3 REFUSES A DUPLICATION ONTO ITSELF, which the ordinary case
-        // reaches whenever a granted directory already occupies the number it
-        // is destined for. Refusing there is correct of dup3 --- the flags could
-        // not be applied --- and here it means the descriptor is already in
-        // place, so it is left alone rather than treated as a failure.
-        for (kal_uintptr i = 0; i < grant_count; ++i) {
-            const okl_long want = static_cast<okl_long>(3 + i);
-            if (granted[i] != want)
-                okl::sys(okl::nr_dup3, granted[i], want, 0);
-        }
-
-        const okl_long why =
-            okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
-                     reinterpret_cast<okl_long>(args.slots),
-                     reinterpret_cast<okl_long>(envs.slots), 0);
-        report.say(why);
-        okl::sys(okl::nr_exit_group, 127);
-        for (;;) { }
-    }
-
-    if (const okl_long why = report.heard()) {
-        reap(child);
-        return okl::translate(why);
-    }
-
-    *out = kal_process{ static_cast<kal_uintptr>(child) };
-    return kal_ok;
-}
 
 int kal_process_wait(kal_process h, int* status, int* terminated_by_environment) {
     if (h.h == 0) return kal_err_invalid;
@@ -483,21 +373,151 @@ int kal_process_wait(kal_process h, int* status, int* terminated_by_environment)
     return kal_ok;
 }
 
+// ⭐ ONE PROGRAM, WHATEVER UNIT IT IS IN.
+//
+// An earlier draft made this reach the whole group when the started program had
+// formed one, recovering that fact with `getpgid(pid) == pid'. It worked, and it
+// was the wrong shape: the meaning of this operation then turned on a property of
+// the handle that no caller could see. The unit has its own operation below, and
+// the caller says which of the two it means.
 int kal_process_terminate(kal_process h) {
     if (h.h == 0) return kal_err_invalid;
     const okl_long r = okl::sys(okl::nr_kill, static_cast<okl_long>(h.h), 15 /* SIGTERM */);
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
+// This program itself joins or forms a unit --- the operation `kal_spawn.job'
+// cannot express, because that one places a program the caller STARTS and a copy
+// wishing to lead a unit must say so about ITSELF before it replaces itself.
+int kal_process_job_enter(kal_job* j) {
+    if (j == nullptr) return kal_err_invalid;
+    const okl_long join = static_cast<okl_long>(j->h);
+    const okl_long r = okl::sys(okl::nr_setpgid, 0, join);
+    if (okl::failed(r)) return okl::translate(r);
+    // The identity of a group is its leader's, so a program that has just formed
+    // one reports its own. Read back rather than assumed: `setpgid(0, 0)' makes
+    // this program the leader, and `getpid' is that leader's identifier.
+    if (join == 0) j->h = static_cast<kal_uintptr>(okl::sys(okl::nr_getpid));
+    return kal_ok;
+}
+
+// Every program in the unit, including ones this implementation never held a
+// handle to --- which is the whole reason a unit exists.
+//
+// ⚠️⚠️ AND IT IS THE SIGNAL THAT CANNOT BE DECLINED, WHICH IS A DECISION AND NOT
+// A DETAIL.
+//
+// `kal_process_terminate' upon ONE program uses the polite one: a caller holds
+// that program's handle, can wait for it, and can terminate it again. None of
+// that is true of a unit. A unit exists because its members include programs the
+// caller never held a handle to and cannot enumerate --- and a request that any
+// one of them may ignore does not terminate the unit, it terminates the part of
+// it that agreed.
+//
+// ⭐ Measured with a consumer's own test: a shell that traps the polite signal
+// and loops. Asked politely, the unit outlived every deadline; the caller's
+// escalation could not help, because openkal has no vocabulary for "and this
+// time I mean it" --- it has no signals at all.
+//
+// ⇒ So the operation does what its name says. ⚠️ WHAT THIS COSTS IS REAL: a
+// member gets no chance to clean up, where on a system programmed directly a
+// caller would send the polite signal first and wait. A caller that wants that
+// still has it --- `kal_process_terminate' upon the member it holds --- and what it
+// cannot do is ask a unit politely.
+//
+// ⚠️ A GROUP IS NAMED BY A PROCESS IDENTIFIER, AND THOSE ARE REUSED. Once the
+// program that formed the group has ended and the numbers have wrapped, this can
+// reach a different group. That is what this system does --- every program that
+// calls `killpg' lives with it --- and the interface records it rather than
+// reading as though it were not so.
+int kal_process_job_terminate(kal_job j) {
+    if (j.h == 0) return kal_err_invalid;
+    const okl_long r = okl::sys(okl::nr_kill, -static_cast<okl_long>(j.h), 9 /* SIGKILL */);
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
+// ⚠️ RELEASES NOTHING AND ENDS NOTHING. A group here is a number, not a resource,
+// so there is no handle to close --- and the operation exists so that a caller
+// need not know that. Where the unit IS a resource, releasing it must still not
+// end its members; the interface says so at the declaration.
+void kal_process_job_close(kal_job) { }
+
 // Releasing the handle does not affect the program. A program that has not been
 // waited for continues, and this environment collects it when the caller exits.
 void kal_process_close(kal_process) { }
+
+// ⭐⭐ A WORD THE ENVIRONMENT SETS WHEN SOMEBODY HAS ASKED THIS PROGRAM TO END.
+//
+// ⚠️ A HANDLER AND NOT A WAITING CONTEXT, AND THE REASON IS WHICH ONE CAN BE
+// ARMED WITHOUT DISTURBING A PROGRAM THAT NEVER ASKS. Consuming these signals
+// from a context of its own would require them BLOCKED IN EVERY context, and
+// blocking is per-context and inherited: a program that already had contexts
+// running when it first asked would have some that still take the default
+// action, and a program that never asks would have been made unkillable at
+// startup. A disposition is per PROGRAM and can be installed at any moment.
+//
+// The handler does two things, and both are safe to do from one: store a word,
+// and wake whoever waits on it. `kal_task_wait' is what a caller waits with, so
+// the wake is the same operation `kal_task_wake' performs --- issued here as the
+// raw call, because a handler may not enter code that takes a lock.
+//
+// ⚠️ THE RESTORER IS SUPPLIED HERE ON ONE ARCHITECTURE AND BY THE KERNEL ON THE
+// OTHER. On x86_64 a disposition installed without SA_RESTORER faults on return
+// from the handler --- the C library normally supplies the three instructions,
+// and this implementation has no C library beneath it. On aarch64 the kernel
+// supplies it and the flag must NOT be set.
+namespace {
+
+kal_u32 g_stop_word = 0;
+int     g_stop_armed = 0;
+
+#if defined(__x86_64__)
+extern "C" void okl_sigreturn_trampoline(void);
+asm(".globl okl_sigreturn_trampoline\n"
+    "okl_sigreturn_trampoline:\n"
+    "  movq $15, %rax\n"      // rt_sigreturn
+    "  syscall\n");
+constexpr unsigned long sa_restorer_flag = 0x04000000u;   // SA_RESTORER
+#endif
+
+void stop_handler(int) {
+    __atomic_store_n(&g_stop_word, 1u, __ATOMIC_RELEASE);
+    okl::sys(okl::nr_futex, reinterpret_cast<okl_long>(&g_stop_word),
+             1 /* FUTEX_WAKE */, 0x7fffffff, 0, 0, 0);
+}
+
+void arm_one(int signo) {
+    struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act {};
+    act.handler = reinterpret_cast<void*>(&stop_handler);
+#if defined(__x86_64__)
+    act.flags   = sa_restorer_flag;
+    act.restorer = reinterpret_cast<void*>(&okl_sigreturn_trampoline);
+#endif
+    okl::sys(okl::nr_rt_sigaction, signo,
+             reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
+}
+
+}  // namespace
+
+// ⚠️ ARMED ON THE FIRST ENQUIRY AND NOT AT STARTUP. A program that never asks
+// keeps the default action, which is what every program that has never heard of
+// this operation expects --- and it is the only arrangement under which adding
+// this operation changes nothing for anyone who does not use it.
+const kal_u32* kal_process_stop_requested(void) {
+    if (!__atomic_exchange_n(&g_stop_armed, 1, __ATOMIC_ACQ_REL)) {
+        arm_one(15);   // SIGTERM
+        arm_one(2);    // SIGINT
+    }
+    return &g_stop_word;
+}
 
 kal_uintptr kal_process_props(void) {
     return KAL_PROCESS_PROP_TERMINATE | KAL_PROCESS_PROP_STREAM_PASSING
          | KAL_PROCESS_PROP_EXIT_STATUS
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
-         | KAL_PROCESS_PROP_BOUND_LIFETIME;
+         | KAL_PROCESS_PROP_BOUND_LIFETIME
+         | KAL_PROCESS_PROP_JOB
+         | KAL_PROCESS_PROP_STOP_REQUESTED;
 }
 
 }
