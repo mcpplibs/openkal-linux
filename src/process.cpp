@@ -187,8 +187,7 @@ int kal_process_spawn(const kal_spawn* how,
     // bound lifetime and received a program without one has been given a program
     // that outlives it --- which is the failure the flag exists to remove --- so an
     // unclaimed position is an error and not a thing to proceed without.
-    constexpr kal_uintptr known = KAL_SPAWN_BOUND_LIFETIME | KAL_SPAWN_OWN_JOB;
-    if (how->flags & ~known) return kal_err_not_supported;
+    if (how->flags & ~KAL_SPAWN_BOUND_LIFETIME) return kal_err_not_supported;
 
     okl::terminated p(path, path_len);
     if (!p.ok) return kal_err_invalid;
@@ -212,7 +211,13 @@ int kal_process_spawn(const kal_spawn* how,
     const okl_long er = streams ? static_cast<okl_long>(streams->err.h) : 0;
 
     const bool bind = (how->flags & KAL_SPAWN_BOUND_LIFETIME) != 0;
-    const bool job  = (how->flags & KAL_SPAWN_OWN_JOB) != 0;
+
+    // ⭐ THE UNIT, WHOSE IDENTITY HERE IS A PROCESS GROUP'S --- which is to say,
+    // the identifier of whichever program formed it first. `join' is zero for the
+    // first member, and the child then makes the group its own; a later member is
+    // given the number to join.
+    const okl_long join = how->job ? static_cast<okl_long>(how->job->h) : 0;
+    const bool     unit = how->job != nullptr;
 
     const okl_long mine = bind ? okl::sys(okl::nr_getpid) : 0;
 
@@ -256,11 +261,12 @@ int kal_process_spawn(const kal_spawn* how,
             for (;;) { }
         }
 
-        // ⭐ A JOB OF ITS OWN, so that terminating it reaches what it starts.
-        // Asked for here and not from the parent: the parent's own `setpgid' on
-        // this child races the replacement below, and loses it once the program
-        // has been replaced.
-        if (job) okl::sys(okl::nr_setpgid, 0, 0);
+        // ⭐ THE UNIT, ENTERED HERE AND NOT FROM THE PARENT: the parent's own
+        // `setpgid' on this child races the replacement below and loses once the
+        // program has been replaced. Zero means "your own", which is how a group
+        // comes into existence at all --- there is nothing to create beforehand,
+        // which is why the interface reports the identity rather than taking it.
+        if (unit) okl::sys(okl::nr_setpgid, 0, join);
 
         if (bind) {
             // 9 is SIGKILL: the binding must not be something the started program
@@ -288,6 +294,12 @@ int kal_process_spawn(const kal_spawn* how,
         reap(child);
         return okl::translate(why);
     }
+
+    // ⚠️ WRITTEN ONLY AFTER THE START HAS SUCCEEDED, and only when the unit was
+    // new. The first member's identifier IS the group's, so this is where the
+    // caller learns it; a later member joins one the caller already holds and
+    // there is nothing to report.
+    if (unit && join == 0) how->job->h = static_cast<kal_uintptr>(child);
 
     *out = kal_process{ static_cast<kal_uintptr>(child) };
     return kal_ok;
@@ -361,28 +373,38 @@ int kal_process_wait(kal_process h, int* status, int* terminated_by_environment)
     return kal_ok;
 }
 
-// ⭐ REACHES THE WHOLE JOB WHEN THERE IS ONE, AND THE HANDLE DOES NOT HAVE TO SAY
-// SO --- the kernel already knows.
+// ⭐ ONE PROGRAM, WHATEVER UNIT IT IS IN.
 //
-// A program started with KAL_SPAWN_OWN_JOB called `setpgid(0, 0)', so its group
-// identifier IS its own. A program started without it inherited this
-// implementation's group, whose identifier is some other process. So
-// `getpgid(pid) == pid' distinguishes the two exactly, and no state has to be
-// carried on the handle to remember which spawn produced it.
-//
-// ⚠️ WITHOUT THIS THE FLAG WOULD DO NOTHING VISIBLE. Forming the job in the
-// started program is half of it; the half that matters to a caller is that
-// terminating reaches what that program itself started. A shell that backgrounds
-// work is killed and its background work survives --- which is the failure the
-// flag exists to remove, and it would have survived the flag too.
+// An earlier draft made this reach the whole group when the started program had
+// formed one, recovering that fact with `getpgid(pid) == pid'. It worked, and it
+// was the wrong shape: the meaning of this operation then turned on a property of
+// the handle that no caller could see. The unit has its own operation below, and
+// the caller says which of the two it means.
 int kal_process_terminate(kal_process h) {
     if (h.h == 0) return kal_err_invalid;
-    const okl_long pid = static_cast<okl_long>(h.h);
-    const okl_long pgid = okl::sys(okl::nr_getpgid, pid);
-    const okl_long target = (!okl::failed(pgid) && pgid == pid) ? -pid : pid;
-    const okl_long r = okl::sys(okl::nr_kill, target, 15 /* SIGTERM */);
+    const okl_long r = okl::sys(okl::nr_kill, static_cast<okl_long>(h.h), 15 /* SIGTERM */);
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
+
+// Every program in the unit, including ones this implementation never held a
+// handle to --- which is the whole reason a unit exists.
+//
+// ⚠️ A GROUP IS NAMED BY A PROCESS IDENTIFIER, AND THOSE ARE REUSED. Once the
+// program that formed the group has ended and the numbers have wrapped, this can
+// reach a different group. That is what this system does --- every program that
+// calls `killpg' lives with it --- and the interface records it rather than
+// reading as though it were not so.
+int kal_process_job_terminate(kal_job j) {
+    if (j.h == 0) return kal_err_invalid;
+    const okl_long r = okl::sys(okl::nr_kill, -static_cast<okl_long>(j.h), 15 /* SIGTERM */);
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
+// ⚠️ RELEASES NOTHING AND ENDS NOTHING. A group here is a number, not a resource,
+// so there is no handle to close --- and the operation exists so that a caller
+// need not know that. Where the unit IS a resource, releasing it must still not
+// end its members; the interface says so at the declaration.
+void kal_process_job_close(kal_job) { }
 
 // Releasing the handle does not affect the program. A program that has not been
 // waited for continues, and this environment collects it when the caller exits.
@@ -393,7 +415,7 @@ kal_uintptr kal_process_props(void) {
          | KAL_PROCESS_PROP_EXIT_STATUS
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
-         | KAL_PROCESS_PROP_OWN_JOB;
+         | KAL_PROCESS_PROP_JOB;
 }
 
 }
