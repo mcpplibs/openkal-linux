@@ -100,7 +100,7 @@ enum : okl_long {
     nr_dup2 = 33, nr_utimensat = 280, nr_symlinkat = 266, nr_fstatfs = 138,
     nr_getrandom = 318,
     // openkal 0.11: the directory a started program runs in, and the unit it joins
-    nr_fchdir = 81, nr_setpgid = 109,
+    nr_fchdir = 81, nr_setpgid = 109, nr_rt_sigaction = 13,
     // openkal.net and openkal.datagram
     nr_socket = 41, nr_connect = 42, nr_accept = 43, nr_sendto = 44,
     nr_recvfrom = 45, nr_shutdown = 48, nr_bind = 49, nr_listen = 50,
@@ -186,7 +186,7 @@ enum : okl_long {
     nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
     nr_getrandom = 278,
     // openkal 0.11: the directory a started program runs in, and the unit it joins
-    nr_fchdir = 50, nr_setpgid = 154,
+    nr_fchdir = 50, nr_setpgid = 154, nr_rt_sigaction = 134,
     // openkal.net and openkal.datagram
     nr_socket = 198, nr_connect = 203, nr_accept = 202, nr_sendto = 206,
     nr_recvfrom = 207, nr_shutdown = 210, nr_bind = 200, nr_listen = 201,

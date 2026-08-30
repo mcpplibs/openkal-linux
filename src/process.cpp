@@ -386,8 +386,44 @@ int kal_process_terminate(kal_process h) {
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
+// This program itself joins or forms a unit --- the operation `kal_spawn.job'
+// cannot express, because that one places a program the caller STARTS and a copy
+// wishing to lead a unit must say so about ITSELF before it replaces itself.
+int kal_process_job_enter(kal_job* j) {
+    if (j == nullptr) return kal_err_invalid;
+    const okl_long join = static_cast<okl_long>(j->h);
+    const okl_long r = okl::sys(okl::nr_setpgid, 0, join);
+    if (okl::failed(r)) return okl::translate(r);
+    // The identity of a group is its leader's, so a program that has just formed
+    // one reports its own. Read back rather than assumed: `setpgid(0, 0)' makes
+    // this program the leader, and `getpid' is that leader's identifier.
+    if (join == 0) j->h = static_cast<kal_uintptr>(okl::sys(okl::nr_getpid));
+    return kal_ok;
+}
+
 // Every program in the unit, including ones this implementation never held a
 // handle to --- which is the whole reason a unit exists.
+//
+// ⚠️⚠️ AND IT IS THE SIGNAL THAT CANNOT BE DECLINED, WHICH IS A DECISION AND NOT
+// A DETAIL.
+//
+// `kal_process_terminate' upon ONE program uses the polite one: a caller holds
+// that program's handle, can wait for it, and can terminate it again. None of
+// that is true of a unit. A unit exists because its members include programs the
+// caller never held a handle to and cannot enumerate --- and a request that any
+// one of them may ignore does not terminate the unit, it terminates the part of
+// it that agreed.
+//
+// ⭐ Measured with a consumer's own test: a shell that traps the polite signal
+// and loops. Asked politely, the unit outlived every deadline; the caller's
+// escalation could not help, because openkal has no vocabulary for "and this
+// time I mean it" --- it has no signals at all.
+//
+// ⇒ So the operation does what its name says. ⚠️ WHAT THIS COSTS IS REAL: a
+// member gets no chance to clean up, where on a system programmed directly a
+// caller would send the polite signal first and wait. A caller that wants that
+// still has it --- `kal_process_terminate' upon the member it holds --- and what it
+// cannot do is ask a unit politely.
 //
 // ⚠️ A GROUP IS NAMED BY A PROCESS IDENTIFIER, AND THOSE ARE REUSED. Once the
 // program that formed the group has ended and the numbers have wrapped, this can
@@ -396,7 +432,7 @@ int kal_process_terminate(kal_process h) {
 // reading as though it were not so.
 int kal_process_job_terminate(kal_job j) {
     if (j.h == 0) return kal_err_invalid;
-    const okl_long r = okl::sys(okl::nr_kill, -static_cast<okl_long>(j.h), 15 /* SIGTERM */);
+    const okl_long r = okl::sys(okl::nr_kill, -static_cast<okl_long>(j.h), 9 /* SIGKILL */);
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
