@@ -46,6 +46,115 @@ struct vector {
     }
 };
 
+// --- reporting a replacement that failed -----------------------------------
+//
+// ⚠️⚠️ THE REPLACEMENT HAPPENS IN THE DUPLICATE, SO ITS FAILURE WAS REPORTED TO
+// NOBODY.
+//
+// A program is started here by duplicating this image and replacing the
+// duplicate. The replacement is the part that can fail --- the name is absent,
+// or is a directory, or is not a program, or may not be executed --- and it
+// fails inside an image the caller does not have. This implementation ended
+// that image with 127 and answered `kal_ok' with a handle, so a caller learned
+// something was wrong only by waiting and reading 127, which is exactly what a
+// program that RAN and exited 127 reports.
+//
+// ⭐ WHAT THAT COST, MEASURED BY A CONSUMER RATHER THAN HERE. openkal-musl
+// expresses `execve' as starting a program and ending with its status, so a
+// name that could not be started ended the CALLING program with 127 instead of
+// returning -1. musl's `execvp' issues one `execve' per PATH entry and needs
+// each to return, so the search could not survive its first miss: `bwrap',
+// installed at /usr/bin/bwrap, was reported as not installed. openkal-linux#13,
+// nine of nineteen test failures.
+//
+// openkal-musl 0.10.0 answers the part it can --- it asks `kal_fs_info' whether
+// the name is there before starting. It cannot answer the rest: openkal reports
+// no execute permission, so "present and not executable" is invisible above
+// this line. It is not invisible HERE. The duplicate knows precisely why, and
+// this is the channel that carries it.
+//
+// The arrangement is the ordinary one: a pipe whose ends close when the image is
+// replaced. Nothing arrives ⇒ the replacement happened. A value arrives ⇒ it did
+// not, and the value says why.
+struct exec_report {
+    int  fd[2] = { -1, -1 };
+    bool armed = false;
+
+    // ⚠️ THE PIPE MUST NOT SIT WHERE THE DUPLICATE IS ABOUT TO PLACE SOMETHING.
+    // The duplicate places streams at 0, 1 and 2 and granted directories at 3
+    // and upwards, so a pipe that happened to hold one of those numbers would be
+    // closed by the very placement whose failure it exists to report --- and the
+    // parent would then read end-of-input and call that success.
+    //
+    // `F_DUPFD_CLOEXEC' answers the lowest FREE descriptor at or above a bound.
+    // That is the primitive for this, and `dup3' is not: `dup3' is told the
+    // number and closes whatever the caller had on it.
+    bool open(kal_uintptr placements) {
+        const okl_long r = okl::sys(okl::nr_pipe2,
+                                    reinterpret_cast<okl_long>(fd), okl::o_cloexec);
+        if (okl::failed(r)) return false;
+        const okl_long floor = 3 + static_cast<okl_long>(placements);
+        armed = lift(fd[0], floor) && lift(fd[1], floor);
+        if (!armed) close_both();
+        return armed;
+    }
+
+    void close_both() {
+        if (fd[0] >= 0) okl::sys(okl::nr_close, fd[0]);
+        if (fd[1] >= 0) okl::sys(okl::nr_close, fd[1]);
+        fd[0] = fd[1] = -1;
+    }
+
+    // In the duplicate, once the replacement has returned --- which it does only
+    // when it did not happen.
+    void say(okl_long failure) const {
+        if (!armed) return;
+        okl_long value = failure;
+        okl::sys(okl::nr_write, fd[1],
+                 reinterpret_cast<okl_long>(&value), sizeof value);
+    }
+
+    // In this image. Zero when the replacement happened, otherwise the kernel's
+    // own negative value for why it did not.
+    okl_long heard() {
+        if (!armed) return 0;
+        okl::sys(okl::nr_close, fd[1]);
+        fd[1] = -1;
+        okl_long value = 0;
+        okl_long n;
+        // A transfer this short is not divided, but it can be interrupted.
+        do {
+            n = okl::sys(okl::nr_read, fd[0],
+                         reinterpret_cast<okl_long>(&value), sizeof value);
+        } while (n == -okl::e_intr);
+        okl::sys(okl::nr_close, fd[0]);
+        fd[0] = -1;
+        return (n == static_cast<okl_long>(sizeof value)) ? value : 0;
+    }
+
+private:
+    static bool lift(int& f, okl_long floor) {
+        const okl_long n = okl::sys(okl::nr_fcntl, f, okl::f_dupfd_cloexec, floor);
+        if (okl::failed(n)) return false;
+        okl::sys(okl::nr_close, f);
+        f = static_cast<int>(n);
+        return true;
+    }
+};
+
+// A duplicate that could not be replaced is ended, and this image waits for it
+// so that nothing is left for a caller to meet later. It is the one wait this
+// implementation performs that a caller did not ask for, and it is bounded: the
+// duplicate has already reached `exit_group'.
+inline void reap(okl_long child) {
+    int status = 0;
+    okl_long r;
+    do {
+        r = okl::sys(okl::nr_wait4, child,
+                     reinterpret_cast<okl_long>(&status), 0, 0);
+    } while (r == -okl::e_intr);
+}
+
 }  // namespace
 
 extern "C" {
@@ -74,12 +183,18 @@ int kal_process_spawn(kal_dir base,
     const okl_long ou  = streams ? static_cast<okl_long>(streams->out.h) : 0;
     const okl_long er  = streams ? static_cast<okl_long>(streams->err.h) : 0;
 
+    // Opened before the duplication, so that the duplicate inherits it. A pipe
+    // that cannot be made is not a reason to refuse the spawn: this answers as
+    // it did before the channel existed.
+    exec_report report;
+    report.open(0);
+
     // The image is duplicated and then replaced. openkal has no operation that
     // duplicates the calling image, and this is why: the duplicate is not a
     // resource the caller receives, it exists for the length of two system
     // calls, and no environment without it could be asked to reproduce it.
     const okl_long child = okl::sys(okl::nr_clone, 17 /* SIGCHLD */, 0, 0, 0, 0);
-    if (okl::failed(child)) return okl::translate(child);
+    if (okl::failed(child)) { report.close_both(); return okl::translate(child); }
 
     if (child == 0) {
         if (in != 0) okl::sys(okl::nr_dup3, in, 0, 0);
@@ -90,11 +205,20 @@ int kal_process_spawn(kal_dir base,
         // operation that changes a working directory afterwards, because a
         // working directory that can be changed is shared mutable state
         // between execution contexts.
-        okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
-                 reinterpret_cast<okl_long>(args.slots),
-                 reinterpret_cast<okl_long>(envs.slots), 0);
+        const okl_long why =
+            okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
+                     reinterpret_cast<okl_long>(args.slots),
+                     reinterpret_cast<okl_long>(envs.slots), 0);
+        // Reached only when the replacement did not happen, because when it does
+        // there is nothing here to reach.
+        report.say(why);
         okl::sys(okl::nr_exit_group, 127);
         for (;;) { }
+    }
+
+    if (const okl_long why = report.heard()) {
+        reap(child);
+        return okl::translate(why);
     }
 
     *out = kal_process{ static_cast<kal_uintptr>(child) };
@@ -187,8 +311,12 @@ int kal_process_spawn_with(kal_dir base,
     const okl_long ou = streams ? static_cast<okl_long>(streams->out.h) : 0;
     const okl_long er = streams ? static_cast<okl_long>(streams->err.h) : 0;
 
+    // The bound is 3 + grant_count, because the placements below reach that far.
+    exec_report report;
+    report.open(grant_count);
+
     const okl_long child = okl::sys(okl::nr_clone, 17 /* SIGCHLD */, 0, 0, 0, 0);
-    if (okl::failed(child)) return okl::translate(child);
+    if (okl::failed(child)) { report.close_both(); return okl::translate(child); }
 
     if (child == 0) {
         if (in != 0) okl::sys(okl::nr_dup3, in, 0, 0);
@@ -206,11 +334,18 @@ int kal_process_spawn_with(kal_dir base,
                 okl::sys(okl::nr_dup3, granted[i], want, 0);
         }
 
-        okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
-                 reinterpret_cast<okl_long>(args.slots),
-                 reinterpret_cast<okl_long>(envs.slots), 0);
+        const okl_long why =
+            okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
+                     reinterpret_cast<okl_long>(args.slots),
+                     reinterpret_cast<okl_long>(envs.slots), 0);
+        report.say(why);
         okl::sys(okl::nr_exit_group, 127);
         for (;;) { }
+    }
+
+    if (const okl_long why = report.heard()) {
+        reap(child);
+        return okl::translate(why);
     }
 
     *out = kal_process{ static_cast<kal_uintptr>(child) };
