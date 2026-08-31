@@ -258,6 +258,13 @@ enum : okl_long {
     // closes what is on it.
     f_dupfd_cloexec = 1030,
 
+    // ⭐ The same primitive WITHOUT the flag, which is the point of having both.
+    // A descriptor duplicated this way survives a replacement, and starting a
+    // program that needs an interpreter depends on exactly that --- see the
+    // duplication in `kal_process_spawn'. `dup' would do as well and this
+    // architecture pair does not agree on whether it exists.
+    f_dupfd = 0,
+
     // ⭐⭐ THE OPEN-FILE FORM AND NOT THE PROCESS FORM, WHICH IS THE WHOLE
     // DIFFERENCE.
     //

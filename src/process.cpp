@@ -279,8 +279,39 @@ int kal_process_spawn(const kal_spawn* how,
                 okl::sys(okl::nr_exit_group, 127);
         }
 
+        // ⚠️⚠️ THE BASE IS DUPLICATED SO THAT IT SURVIVES THE REPLACEMENT, AND
+        // WITHOUT THIS A WHOLE CLASS OF PROGRAMS COULD NOT BE STARTED AT ALL.
+        //
+        // `execveat' with a dirfd and a relative name gives the program's name to
+        // the kernel as `/dev/fd/<dirfd>/<name>'. That spelling is invisible to a
+        // caller and harmless for an ordinary executable --- the kernel already
+        // holds the file open. It stops being harmless the moment the program
+        // needs an INTERPRETER: a `#!' script, or a binary of another
+        // architecture registered through `binfmt_misc'. The kernel then starts
+        // the interpreter and hands it that name to open --- AFTER the
+        // replacement, by which time a close-on-exec dirfd is gone. The
+        // interpreter is told the script does not exist.
+        //
+        // ⭐ Measured in twenty lines of plain C, with everything else identical:
+        //
+        //     dirfd WITH O_CLOEXEC       execveat -> ENOENT
+        //     dirfd WITHOUT O_CLOEXEC    STARTED ok
+        //
+        // ⚠️ It is not a property of one architecture. It was FOUND on aarch64,
+        // where every foreign binary needs the binfmt interpreter and so every
+        // start failed --- and it was mistaken there for a limit of the emulator.
+        // It reproduces natively on x86_64 with a `#!' script, which is what a
+        // consumer meets on any machine.
+        //
+        // ⚠️ Duplicated HERE, in the started image, and not where the preopens are
+        // made: the caller's own descriptors stay close-on-exec, which is what
+        // every other operation of this implementation relies upon. `dup' clears
+        // the flag by definition, so the copy is the exec-visible one.
+        const okl_long visible = okl::sys(okl::nr_fcntl, b, okl::f_dupfd, 0);
+        const okl_long base = okl::failed(visible) ? b : visible;
+
         const okl_long why =
-            okl::sys(okl::nr_execveat, b, reinterpret_cast<okl_long>(p.buf),
+            okl::sys(okl::nr_execveat, base, reinterpret_cast<okl_long>(p.buf),
                      reinterpret_cast<okl_long>(args.slots),
                      reinterpret_cast<okl_long>(envs.slots), 0);
         // Reached only when the replacement did not happen, because when it does
