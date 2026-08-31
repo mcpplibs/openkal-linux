@@ -486,15 +486,22 @@ void stop_handler(int) {
              1 /* FUTEX_WAKE */, 0x7fffffff, 0, 0, 0);
 }
 
-void arm_one(int signo) {
+// ⚠️ THE RESULT IS EXAMINED, AND IT WAS NOT WHEN THIS SHIPPED IN 0.11. An
+// installation that failed would leave a word that can never change, and
+// answering the caller with one is `reporting success having done nothing' in
+// its exact form: the program asks whether its end has been requested, is told
+// no, and goes on being told no after it has been. Found reviewing the same
+// code written for the other kernel, where the trampoline made the failure
+// mode obvious.
+bool arm_one(int signo) {
     struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act {};
     act.handler = reinterpret_cast<void*>(&stop_handler);
 #if defined(__x86_64__)
     act.flags   = sa_restorer_flag;
     act.restorer = reinterpret_cast<void*>(&okl_sigreturn_trampoline);
 #endif
-    okl::sys(okl::nr_rt_sigaction, signo,
-             reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
+    return !okl::failed(okl::sys(okl::nr_rt_sigaction, signo,
+                                 reinterpret_cast<okl_long>(&act), 0, sizeof act.mask));
 }
 
 }  // namespace
@@ -504,11 +511,15 @@ void arm_one(int signo) {
 // this operation expects --- and it is the only arrangement under which adding
 // this operation changes nothing for anyone who does not use it.
 const kal_u32* kal_process_stop_requested(void) {
-    if (!__atomic_exchange_n(&g_stop_armed, 1, __ATOMIC_ACQ_REL)) {
-        arm_one(15);   // SIGTERM
-        arm_one(2);    // SIGINT
+    // ⚠️ THREE STATES AND NOT TWO: not yet tried, armed, refused. A second
+    // caller is told what the first found rather than arming again.
+    int state = __atomic_load_n(&g_stop_armed, __ATOMIC_ACQUIRE);
+    if (state == 0) {
+        const bool ok = arm_one(15) && arm_one(2);   // SIGTERM, SIGINT
+        state = ok ? 1 : -1;
+        __atomic_store_n(&g_stop_armed, state, __ATOMIC_RELEASE);
     }
-    return &g_stop_word;
+    return state == 1 ? &g_stop_word : nullptr;
 }
 
 kal_uintptr kal_process_props(void) {
@@ -517,7 +528,13 @@ kal_uintptr kal_process_props(void) {
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
          | KAL_PROCESS_PROP_JOB
-         | KAL_PROCESS_PROP_STOP_REQUESTED;
+         // ⚠️ AGREES WITH `kal_process_stop_requested', because the header
+         // defines null there as the absence this position reports. Read and
+         // never armed: asking what an implementation can do must not install a
+         // disposition, so the position is claimed until an installation has
+         // actually been refused.
+         | (__atomic_load_n(&g_stop_armed, __ATOMIC_ACQUIRE) == -1
+                ? 0u : KAL_PROCESS_PROP_STOP_REQUESTED);
 }
 
 }
