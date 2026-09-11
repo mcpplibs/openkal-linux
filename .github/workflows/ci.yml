@@ -303,6 +303,116 @@ jobs:
           test "$bad" -eq 0
           echo "the implementation references no C library symbol"
 
+      # ANDROID SHARES THIS IMPLEMENTATION, AND THIS IS WHAT SAYS SO.
+      #
+      # This file is written on the Linux kernel's own system-call interface and
+      # borrows nothing from any C library. Android's kernel IS Linux, the
+      # per-architecture system-call ABI is the same, and `src/sys.h` branches
+      # on `__x86_64__` / `__aarch64__` -- the architecture, not the operating
+      # system. So the claim is that nothing here needs to change, and a claim
+      # about what does not change is exactly the kind that rots unmeasured.
+      #
+      # THE SECOND HALF IS THE INTERESTING ONE. Compiling is the weaker
+      # statement; the property this package exists for is that its objects
+      # name no C library symbol, and on Android the C library is a DIFFERENT
+      # one. A reference that resolved to glibc by habit would show up here as
+      # a bionic name, so the same permitted set is applied to the same kind of
+      # output for a different libc.
+      #
+      # ONE MATRIX LEG, AND THE AXIS DOES NOT REACH THIS TARGET. The Android
+      # rows carry a CAPABILITY pin (`android-ndk@...`), which means mcpp
+      # refuses any other toolchain for them -- so `matrix.toolchain` selects
+      # nothing here and running both legs would download the NDK twice for one
+      # signal.
+      #
+      # NOT EXECUTION. Running an Android artifact needs a device or an
+      # emulator: measured by hand on an API 24 x86_64 image, where a program
+      # written against openkal alone printed `openkal: 1-2-3` with exit 0, and
+      # the device ABI has no execution path from an x86_64 runner at all
+      # (Google's emulator refuses a foreign guest). This job asserts the two
+      # things a runner can.
+      - name: Android shares this implementation, and its objects still name no C library
+        if: matrix.toolchain == 'llvm@22.1.8'
+        run: |
+          permitted='^(memcpy|memmove|memset|memcmp|__libc_start_main|main|_GLOBAL_OFFSET_TABLE_|kal_[a-z_]+|__init_array_start|__init_array_end|__preinit_array_start|__preinit_array_end|_ZN3okl.*)$'
+          weak_permitted='^environ$'
+
+          # TWO NAMES THE NATIVE SET DOES NOT HAVE, AND THEY ARE NOT A C
+          # LIBRARY'S.
+          #
+          # Measured: both are defined in the NDK's own
+          # `libclang_rt.builtins-<arch>-android.a` and in NEITHER bionic
+          # `libc.so` -- so they belong to the same category the set above
+          # already admits for memcpy and its three neighbours: emitted by the
+          # compiler, computing rather than calling, and incapable of
+          # re-entering this implementation.
+          #
+          #   __emutls_get_address   emulated thread-local storage. NOT mcpp's
+          #                          choice: `build.ninja` for this target
+          #                          carries no `-femulated-tls`, and the NDK's
+          #                          clang emits this reference by itself from
+          #                          a bare `thread_local int x;` at API 21,
+          #                          which is its documented default below the
+          #                          level where bionic gained ELF TLS.
+          #   __aarch64_swp4_acq     an outline-atomics helper, aarch64 only,
+          #                          which is why it appears on one ABI and not
+          #                          the other.
+          #
+          # Kept in this step rather than widened into the native one: nothing
+          # about the native build has been measured to need them, and a
+          # permitted set that grows for a target it was not measured on is how
+          # a check stops being one.
+          permitted_compiler_rt='^(__emutls_get_address|__aarch64_[a-z0-9_]+)$'
+          rm -f "$RUNNER_TEMP/android.bad"
+
+          for target in aarch64-linux-android x86_64-linux-android; do
+            echo "== $target =="
+            rm -rf target
+            mcpp build --target "$target" --features standalone
+
+            objs=$(find target -path '*/obj/*' -name '*.o' ! -name '*.m.o' ! -name 'conformance*')
+            test -n "$objs" || {
+              echo "::error::no objects were found for $target; the check would pass vacuously" >&2
+              exit 1
+            }
+
+            # The objects are for the guest architecture, and one of the two is
+            # not this runner's -- so assert the architecture rather than trust
+            # that `--target` was honoured. `file` names it for both.
+            case "$target" in
+              aarch64-*) want='ARM aarch64' ;;
+              x86_64-*)  want='x86-64' ;;
+            esac
+            one=$(printf '%s\n' $objs | head -1)
+            file "$one" | grep -q "$want" || {
+              echo "::error::$one is not $want: $(file "$one")" >&2
+              exit 1
+            }
+
+            nm --undefined-only $objs | awk '{ print $1, $2 }' | sort -u |
+            while read -r kind name; do
+              [ -n "$name" ] || continue
+              printf '%s\n' "$name" | grep -qE "$permitted" && continue
+              printf '%s\n' "$name" | grep -qE "$permitted_compiler_rt" && continue
+              if printf '%s\n' "$name" | grep -qE "$weak_permitted"; then
+                case "$kind" in
+                  w|v) continue ;;
+                  *)   echo "::error::$name is permitted only as a weak reference, and this one is '$kind'" >&2 ;;
+                esac
+              else
+                echo "::error::$target references a symbol it must not: $name" >&2
+              fi
+              echo bad >> "$RUNNER_TEMP/android.bad"
+            done
+          done
+
+          if [ -s "$RUNNER_TEMP/android.bad" ]; then
+            rm -f "$RUNNER_TEMP/android.bad"
+            exit 1
+          fi
+          rm -f "$RUNNER_TEMP/android.bad"
+          echo "both Android ABIs build from this implementation unchanged, and name no C library symbol"
+
       # A checker is only useful if it fails when it should.
       - name: The independence check detects a dependence
         run: |
