@@ -30,7 +30,13 @@ on:
         default: ""
 env:
   MCPP_SOURCE_REF: ${{ github.event.inputs.mcpp_ref || vars.MCPP_SOURCE_REF }}
-  MCPP_VERSION: 2026.8.27.1
+  # BUMPED WITH THE ANDROID STEP, BECAUSE THAT STEP NEEDS THIS ENGINE.
+  # `aarch64-linux-android` and `x86_64-linux-android` become real target
+  # rows in 2026.9.11.3; on 2026.8.27.1 they do not exist and the step
+  # fails with exit 2. This is the CI pin -- what this repository is
+  # tested against -- and not a floor: nothing here records a minimum
+  # engine for consumers.
+  MCPP_VERSION: 2026.9.11.3
   XLINGS_VERSION: v2026.8.17.2
   XLINGS_NON_INTERACTIVE: '1'
 
