@@ -224,13 +224,13 @@ kal_uintptr kal_task_current(void) {
 
 // How many contexts can run at the same moment. Version 0.10.
 //
-// ⚠️⚠️ ADDED BECAUSE ITS ABSENCE WAS A WRONG ANSWER RATHER THAN A REFUSAL.
+// ADDED BECAUSE ITS ABSENCE WAS A WRONG ANSWER RATHER THAN A REFUSAL.
 // `KAL_TASK_PROP_PARALLEL' says WHETHER and not HOW MANY, so a C library above
 // had nowhere to look and `hardware_concurrency()' answered 1 with no error ---
 // a program sizing a pool of workers got one worker and no way to know.
 // Measured: 1 through openkal-musl against 32 on the same machine.
 //
-// ⭐ THE SET THIS CONTEXT MAY RUN ON, not the set the machine has. A program
+// THE SET THIS CONTEXT MAY RUN ON, not the set the machine has. A program
 // confined to two processors is asked to size itself against two; asking the
 // machine would have it size against a number it cannot use.
 kal_uintptr kal_task_parallelism(void) {

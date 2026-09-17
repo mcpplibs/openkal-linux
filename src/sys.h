@@ -99,6 +99,8 @@ enum : okl_long {
     nr_renameat = 264, nr_readlinkat = 267, nr_dup3 = 292, nr_execveat = 322,
     nr_dup2 = 33, nr_utimensat = 280, nr_symlinkat = 266, nr_fstatfs = 138,
     nr_getrandom = 318,
+    // openkal 0.13: whether a node may be started
+    nr_fchmodat = 268,
     // openkal 0.11: the directory a started program runs in, and the unit it joins
     nr_fchdir = 81, nr_setpgid = 109, nr_rt_sigaction = 13,
     // openkal.net and openkal.datagram
@@ -185,6 +187,8 @@ enum : okl_long {
     nr_prctl = 167, nr_sched_getaffinity = 123, nr_getppid = 173,
     nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
     nr_getrandom = 278,
+    // openkal 0.13: whether a node may be started
+    nr_fchmodat = 53,
     // openkal 0.11: the directory a started program runs in, and the unit it joins
     nr_fchdir = 50, nr_setpgid = 154, nr_rt_sigaction = 134,
     // openkal.net and openkal.datagram
@@ -207,7 +211,8 @@ enum : okl_long {
 // appear here rather than being taken from a header: the header belongs to a
 // C library and this implementation has none.
 enum : int {
-    e_perm = 1, e_noent = 2, e_intr = 4, e_io = 5, e_badf = 9, e_child = 10,
+    e_perm = 1, e_noent = 2, e_intr = 4, e_io = 5, e_noexec = 8, e_badf = 9,
+    e_child = 10,
     e_again = 11, e_nomem = 12, e_acces = 13, e_fault = 14, e_busy = 16,
     e_exist = 17, e_xdev = 18, e_nodev = 19, e_notdir = 20, e_isdir = 21,
     e_inval = 22, e_nfile = 23, e_mfile = 24, e_notty = 25, e_fbig = 27,
@@ -218,7 +223,7 @@ enum : int {
 
 // --- constants the kernel defines ------------------------------------------
 //
-// ⚠️⚠️ THREE OF THESE ARE NOT THE SAME NUMBER ON BOTH ARCHITECTURES, AND WERE
+// THREE OF THESE ARE NOT THE SAME NUMBER ON BOTH ARCHITECTURES, AND WERE
 // WRITTEN AS THOUGH THEY WERE.
 //
 // `O_DIRECTORY', `O_NOFOLLOW' and `O_DIRECT' have one set of values on x86_64
@@ -235,7 +240,7 @@ enum : int {
 // THIS IMPLEMENTATION TRIED TO OPEN FAILED --- including the two preopens it
 // supplies at inception, which is every directory a program above it can reach.
 //
-// ⭐ MEASURED, and the reading is unambiguous: on aarch64 `kal_fs_preopen_count'
+// MEASURED, and the reading is unambiguous: on aarch64 `kal_fs_preopen_count'
 // answered two and both entries reported `kal_err_permission' with a handle of
 // zero, while the same program on x86_64 reported both directories and opened a
 // file in one. A C library above it then had no directory to resolve a name
@@ -243,7 +248,7 @@ enum : int {
 // reads as a program started somewhere odd rather than as an implementation
 // that opened nothing.
 //
-// ⚠️ Nothing caught it. The conformance suite is run on x86_64; this package is
+// Nothing caught it. The conformance suite is run on x86_64; this package is
 // built for aarch64 and the build succeeds, because a wrong constant is a
 // number and not a type error.
 enum : okl_long {
@@ -251,21 +256,21 @@ enum : okl_long {
     o_creat = 0100, o_excl = 0200, o_trunc = 01000, o_append = 02000,
     o_cloexec = 02000000,
 
-    // ⭐ THE LOWEST FREE DESCRIPTOR AT OR ABOVE A BOUND, which is the one
+    // THE LOWEST FREE DESCRIPTOR AT OR ABOVE A BOUND, which is the one
     // primitive that moves a descriptor out of the way WITHOUT NAMING the
     // number it moves to --- and therefore without closing whatever a caller
     // already had there. `dup3' cannot do this: it is told the number, and it
     // closes what is on it.
     f_dupfd_cloexec = 1030,
 
-    // ⭐ The same primitive WITHOUT the flag, which is the point of having both.
+    // The same primitive WITHOUT the flag, which is the point of having both.
     // A descriptor duplicated this way survives a replacement, and starting a
     // program that needs an interpreter depends on exactly that --- see the
     // duplication in `kal_process_spawn'. `dup' would do as well and this
     // architecture pair does not agree on whether it exists.
     f_dupfd = 0,
 
-    // ⭐⭐ THE OPEN-FILE FORM AND NOT THE PROCESS FORM, WHICH IS THE WHOLE
+    // THE OPEN-FILE FORM AND NOT THE PROCESS FORM, WHICH IS THE WHOLE
     // DIFFERENCE.
     //
     // This kernel's oldest record lock is held by the PROCESS, and it is
@@ -317,6 +322,7 @@ inline int translate(okl_long r) {
         case e_notempty:                                 return 11; // kal_err_not_empty
         case e_isdir:                                    return 12; // kal_err_is_directory
         case e_notdir:                                   return 13; // kal_err_not_directory
+        case e_noexec:                                   return 14; // kal_err_not_program
         default:                                         return 3;  // kal_err_io
     }
 }
@@ -401,7 +407,7 @@ struct kstat {
     okl_i64 blksize;
     okl_i64 blocks;
 #else
-    // ⚠️⚠️ THE FIELDS OF THIS ARCHITECTURE'S RECORD WERE IN THE WRONG ORDER, AND
+    // THE FIELDS OF THIS ARCHITECTURE'S RECORD WERE IN THE WRONG ORDER, AND
     // THE BUILD COULD NOT SAY SO.
     //
     // The kernel's architecture-independent `struct stat' --- which aarch64 uses
@@ -410,7 +416,7 @@ struct kstat {
     // neither: the mode was read from offset 60 where the kernel writes a
     // group, and the size from 32 where it writes a device number.
     //
-    // ⭐ MEASURED, the same program on both architectures:
+    // MEASURED, the same program on both architectures:
     //
     //     x86_64    file: kind=1 size=10 writable=1   link: kind=3
     //     aarch64   file: kind=4 size=0  writable=0   link: kind=4
@@ -420,7 +426,7 @@ struct kstat {
     // written ten bytes to was not a regular file --- and every operation that
     // decides upon a kind, which is most of `std::filesystem', decided wrongly.
     //
-    // ⚠️ NOTHING IN THIS ECOSYSTEM COULD HAVE CAUGHT IT. The conformance suite
+    // NOTHING IN THIS ECOSYSTEM COULD HAVE CAUGHT IT. The conformance suite
     // runs on the machine that builds it, and every hosted machine in this
     // ecosystem's continuous integration is x86_64 or an arm64 Mac --- which
     // uses openkal-macos and a different record again. The aarch64 leg of THIS

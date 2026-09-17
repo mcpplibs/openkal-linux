@@ -7,7 +7,7 @@ extern "C" {
 // is what `openkal.stream`'s transfer operations take and what makes a stream
 // this implementation hands out interchangeable with one it received.
 //
-// ⚠️⚠️ ONE CONSEQUENCE, AND IT IS NOT VISIBLE FROM THIS FILE. Standard input is
+// ONE CONSEQUENCE, AND IT IS NOT VISIBLE FROM THIS FILE. Standard input is
 // therefore the handle ZERO, and `kal_spawn_streams` reserves zero to mean
 // "the stream the parent has" (openkal/process.h). The two readings agree at
 // position `in` --- placing standard input at standard input and inheriting it

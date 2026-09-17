@@ -35,14 +35,14 @@ okl_ulong auxval(okl_ulong key) {
 
 namespace {
 
-// ⚠️⚠️ ONE C LIBRARY PASSES THESE AND ANOTHER DOES NOT, AND THE ONE THAT DOES
+// ONE C LIBRARY PASSES THESE AND ANOTHER DOES NOT, AND THE ONE THAT DOES
 // NOT IS THE ONE THIS PACKAGE EXISTS TO SIT BENEATH.
 //
 // glibc calls every `.init_array' entry with (argc, argv, envp). musl calls
 // them with NO ARGUMENTS. A function declared to take three therefore receives
 // whatever the argument registers happened to hold, and this one recorded it.
 //
-// ⭐ MEASURED 2026-08-29, WITH THE CONTROL THAT SEPARATES THE TWO EXPLANATIONS.
+// MEASURED 2026-08-29, WITH THE CONTROL THAT SEPARATES THE TWO EXPLANATIONS.
 // It was found by running the tests for aarch64, where the first enquiry after
 // the count faulted --- which reads as an architecture defect. It is not:
 //
@@ -65,7 +65,7 @@ bool plausible(int argc, char* const* argv, char* const* envp) {
     return true;
 }
 
-// ⚠️ WEAK, AND DATA RATHER THAN A CALL. The independence check in this package
+// WEAK, AND DATA RATHER THAN A CALL. The independence check in this package
 // forbids reaching for the C library's names, because a CALL into the runtime a
 // program supplied would resolve to the program's and could re-enter this
 // implementation without bound. A pointer cannot: it is read once, it executes
@@ -100,7 +100,7 @@ bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
     return false;
 }
 
-// ⚠️⚠️ A PROGRAM ABOVE openkal SHALL NOT BE ENDED BY SOMETHING openkal NEVER
+// A PROGRAM ABOVE openkal SHALL NOT BE ENDED BY SOMETHING openkal NEVER
 // TOLD IT ABOUT, AND WITHOUT THIS LINE ONE WAS.
 //
 // openkal defines no signals. `kal_stream_write' is required to REPORT that the
@@ -110,7 +110,7 @@ bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
 // it stopped, with a status no operation here produced and no wording anywhere in
 // the specification.
 //
-// ⭐ MEASURED THROUGH A CONSUMER, AND THE SHAPE IS WHY IT TOOK SO LONG TO SEE. A
+// MEASURED THROUGH A CONSUMER, AND THE SHAPE IS WHY IT TOOK SO LONG TO SEE. A
 // C library above this one answers `signal(SIGPIPE, SIG_IGN)' --- openkal has no
 // signals, so the library has nothing to set and truthfully reports success. The
 // program is then killed anyway, four layers below the call it made to prevent
@@ -121,7 +121,7 @@ bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
 // fails with EPIPE, which `kal_stream_write' translates and reports, which is
 // what the interface said would happen all along.
 //
-// ⚠️ NOT A POLICY CHOICE ABOUT SIGNALS IN GENERAL. This is the one signal an
+// NOT A POLICY CHOICE ABOUT SIGNALS IN GENERAL. This is the one signal an
 // ordinary openkal operation provokes; the rest are left exactly as this program
 // was started with.
 [[gnu::constructor(101)]] void quiet_the_signal_openkal_cannot_report() {

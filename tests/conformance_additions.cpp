@@ -145,6 +145,42 @@ int main() {
     static_assert(!__is_same(kal::task::props, kal::process::props));
     static_assert(!__is_same(kal::fs::props, kal::fs::open_flags));
 
+    // --- version 0.13: a node that may be started, and one that is not a program
+    //
+    // The mode is read back from the kernel's own record rather than through
+    // the enquiry, so that the enquiry and the operation cannot agree with each
+    // other while both are wrong.
+    {
+        const char* prog = "okl-not-a-program.tmp";
+        const kal_uintptr pn = std::strlen(prog);
+        check(put(prog, "this is text\n"), "a text file is written");
+        check((kal_fs_props(here()) & kal::fs::executable.bits) != 0,
+              "the volume the tests run on records whether a node may be started");
+        check(kal_fs_set_executable_at(here(), prog, pn, 1) == kal_ok,
+              "the node is recorded as startable");
+        kal_node_info info = kal::fs::info_for_caller();
+        check(kal_fs_info(here(), prog, pn, 0, kal::fs::field::executable, &info) == kal_ok
+                  && (info.present & kal::fs::field::executable) != 0 && info.executable == 1,
+              "the enquiry reports it");
+
+        kal_process p{};
+        const char* argv[1] = { prog };
+        const kal_uintptr lens[1] = { pn };
+        const kal_spawn how{ here(), here(), nullptr, nullptr, 0, 0 };
+        const int e = kal_process_spawn(&how, prog, pn, argv, lens, 1,
+                                        nullptr, nullptr, 0, nullptr, &p);
+        check(e == kal_err_not_program,
+              "the kernel's ENOEXEC reaches the caller as kal_err_not_program");
+
+        check(kal_fs_set_executable_at(here(), prog, pn, 0) == kal_ok,
+              "the record is cleared");
+        const kal_spawn again{ here(), here(), nullptr, nullptr, 0, 0 };
+        check(kal_process_spawn(&again, prog, pn, argv, lens, 1,
+                                nullptr, nullptr, 0, nullptr, &p) == kal_err_permission,
+              "and a node not recorded as startable is refused as a permission");
+        kal_fs_remove(here(), prog, pn);
+    }
+
     std::printf("openkal-linux: the operations version 0.5 added\n");
     return failures == 0 ? 0 : 1;
 }

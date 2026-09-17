@@ -64,7 +64,7 @@ jobs:
       # that exists on one machine: a consumer resolving from the index is handed
       # a manifest pointing at a directory that exists nowhere.
       #
-      # ⚠️ THAT HAS HAPPENED IN THIS ECOSYSTEM, in openkal-musl, and the working
+      # THAT HAS HAPPENED IN THIS ECOSYSTEM, in openkal-musl, and the working
       # tree here has carried the same rewrite more than once since. This step
       # runs first, so what it examines is what the commit contains.
       - name: The committed manifest names no local directory
@@ -100,7 +100,7 @@ jobs:
       - name: Install mcpp
         run: |
           xlings update
-          # ⚠️ THE PIN MAY NAME THE RELEASE THIS RUN IS VALIDATING, which does
+          # THE PIN MAY NAME THE RELEASE THIS RUN IS VALIDATING, which does
           # not exist yet — that is the whole point of MCPP_SOURCE_REF. Bootstrap
           # from whatever the index has; the step below replaces it with the
           # build under review, and the pin is what an ordinary run tests.
@@ -111,13 +111,13 @@ jobs:
           fi
           mcpp --version
           mcpp self config --mirror GLOBAL
-          # ⭐⭐ CROSS-VALIDATION: BUILD THE mcpp UNDER REVIEW AND USE THAT ONE.
+          # CROSS-VALIDATION: BUILD THE mcpp UNDER REVIEW AND USE THAT ONE.
           #
           # Empty in the ordinary run, so this job keeps testing the RELEASED
           # mcpp the pin above names. Set it — `workflow_dispatch` input, or the
           # repository variable — and the same job runs against that source.
           #
-          # ⚠️ THIS EXISTS BECAUSE THE ORDER USED TO BE WRONG. Several mcpp
+          # THIS EXISTS BECAUSE THE ORDER USED TO BE WRONG. Several mcpp
           # releases went out green and only then turned this ecosystem red: the
           # engine's own CI cannot see a defect that appears only in a real
           # dependency graph, and this repository could not see the engine until
@@ -130,7 +130,7 @@ jobs:
             [ -d "$src" ] || git clone --quiet --depth 1 \
               --branch "$MCPP_SOURCE_REF" \
               https://github.com/mcpp-community/mcpp.git "$src"
-            # ⚠️ THE CLONE'S OWN WORKSPACE PIN MUST NOT DECIDE WHICH mcpp
+            # THE CLONE'S OWN WORKSPACE PIN MUST NOT DECIDE WHICH mcpp
             # BUILDS IT. `.xlings.json` at mcpp's root pins the mcpp that
             # compiles mcpp, and that pin does not move when mcpp is released —
             # so a build inside the checkout obeys it and tries to install a
@@ -143,7 +143,7 @@ jobs:
             # above, which is exactly what removing the file leaves.
             rm -f "$src/.xlings.json"
             ( cd "$src" && mcpp build --release )
-            # ⚠️ BOTH SPELLINGS, AND NO `-perm`. The matrix reaches Windows and
+            # BOTH SPELLINGS, AND NO `-perm`. The matrix reaches Windows and
             # macOS runners too: on Windows the artefact is `mcpp.exe`, and
             # `-perm -u+x` is not a question that filesystem answers the way this
             # expects. Measured: `Finished release [optimized] in 173.44s`
@@ -157,7 +157,7 @@ jobs:
                     \( -name mcpp -o -name mcpp.exe \) | head -1)
             [ -n "$built" ] || { echo "::error::mcpp did not build from $MCPP_SOURCE_REF"; exit 1; }
             echo "$(cd "$(dirname "$built")" && pwd)" >> "$GITHUB_PATH"
-            # ⚠️ Reported, because a PATH entry that does not win looks exactly
+            # Reported, because a PATH entry that does not win looks exactly
             # like one that does until something built with the wrong engine.
             echo "under review: $("$built" --version)  (from $MCPP_SOURCE_REF)"
           fi
@@ -178,7 +178,7 @@ jobs:
 
       - name: Every interface, every kind of examination
         run: |
-          # ⚠️⚠️ `optional` IS PART OF THE SET AND WAS NOT, WHICH MADE THE STEP'S
+          # `optional` IS PART OF THE SET AND WAS NOT, WHICH MADE THE STEP'S
           # OWN NAME UNTRUE.
           #
           # `full` expands to `standard,abi,stability,cost`, and `standard` is
@@ -229,7 +229,7 @@ jobs:
           # fails to compile and the diagnostic names it.
           list="$(grep -vE '^[[:space:]]*(#|$)' .spec/SURFACE.txt | sort -u)"
           {
-            # ⚠️ THE MODULE LIST IS DERIVED, NOT WRITTEN OUT.
+            # THE MODULE LIST IS DERIVED, NOT WRITTEN OUT.
             #
             # It used to be written out, and it fell out of step the first time
             # the specification gained an interface: SURFACE.txt listed four
@@ -272,7 +272,7 @@ jobs:
           # by construction.
           permitted='^(memcpy|memmove|memset|memcmp|__libc_start_main|main|_GLOBAL_OFFSET_TABLE_|kal_[a-z_]+|__init_array_start|__init_array_end|__preinit_array_start|__preinit_array_end|_ZN3okl.*)$'
 
-          # ⭐⭐ ONE NAME IS PERMITTED ONLY IF IT IS WEAK, AND THE WEAKNESS IS
+          # ONE NAME IS PERMITTED ONLY IF IT IS WEAK, AND THE WEAKNESS IS
           # THE WHOLE OF THE PERMISSION.
           #
           # `environ' is how src/env.cpp recovers the vectors the kernel placed
