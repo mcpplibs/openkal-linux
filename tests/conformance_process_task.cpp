@@ -37,7 +37,7 @@ int main() {
     // The program to start is reached through a directory the environment
     // supplied, which is the whole reason the set exists: a program and the
     // program it starts are commonly not beneath one root.
-    // ⭐ THE NAME IS COPIED INTO A BUFFER HERE, which is what the operation now
+    // THE NAME IS COPIED INTO A BUFFER HERE, which is what the operation now
     // does: it answered with a pointer into the implementation's own storage,
     // which is meaningful only while the implementation shares this address
     // space.

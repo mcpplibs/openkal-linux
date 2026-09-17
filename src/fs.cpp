@@ -58,6 +58,62 @@ int kind_of(okl_u32 mode) {
     }
 }
 
+// The properties of the volume a descriptor is on. kal_fs_props answers with
+// this, and so does the one field of an enquiry that is a volume's property.
+kal_uintptr volume_props(int fd) {
+    // LOCKS AND CAPACITY ARE IN THE CONSERVATIVE SET, and that is a claim
+    // about this kernel rather than about the volume: an open-file lock and
+    // `fstatfs' are answered by the VFS for every format beneath it, including
+    // the read-only ones --- a lock excludes writers a read-only volume does not
+    // have, which is a true answer and not a useful one. A format that could not
+    // would have to be excluded by name here, and this kernel has none.
+    const kal_uintptr conservative =
+        KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_ATOMIC_RENAME
+        | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
+    if (fd < 0) return 0;
+
+    okl::kstatfs sf{};
+    const okl_long r = okl::sys(okl::nr_fstatfs, fd, reinterpret_cast<okl_long>(&sf));
+    if (okl::failed(r)) return conservative;
+
+    switch (sf.f_type) {
+        // Formats with a case-sensitive namespace and nodes that name others.
+        case okl::fs_ext234: case okl::fs_btrfs: case okl::fs_xfs:
+        case okl::fs_f2fs:   case okl::fs_tmpfs: case okl::fs_overlay:
+        case okl::fs_zfs:    case okl::fs_bcachefs:
+            return conservative | KAL_FS_PROP_CASE_SENSITIVE
+                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
+                 | KAL_FS_PROP_EXECUTABLE;
+
+        // Read-only formats: the nodes are there and none can be made, and a
+        // rename cannot be atomic because there is no rename.
+        case okl::fs_squashfs: case okl::fs_erofs:
+            return KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_CASE_SENSITIVE
+                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY
+                 | KAL_FS_PROP_EXECUTABLE;
+        case okl::fs_iso9660:
+            return KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_CASE_SENSITIVE
+                 | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
+
+        // The FAT family stores neither a case distinction nor a node that
+        // names another. `symlink' on such a volume reports EPERM, and this is
+        // where a caller learns that before it tries.
+        case okl::fs_msdos: case okl::fs_exfat:
+            return conservative;
+
+        // A case-insensitive namespace, with nodes that name others.
+        case okl::fs_ntfs: case okl::fs_ntfs3:
+            return conservative | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS;
+        // The same, on a format that stores a mode.
+        case okl::fs_hfsplus:
+            return conservative | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
+                 | KAL_FS_PROP_EXECUTABLE;
+
+        default:
+            return conservative;
+    }
+}
+
 // Writes no more of the structure than the caller says exists on its side, and
 // reports which fields it filled.
 //
@@ -66,12 +122,17 @@ int kind_of(okl_u32 mode) {
 // this kernel, so selecting would cost a branch and save nothing. An
 // implementation whose environment answers them separately is the one `wanted'
 // exists for.
-void fill_info(const okl::kstat& st, kal_u32 wanted, kal_node_info* out) {
-    (void)wanted;
+//
+// The exception is KAL_INFO_EXECUTABLE, which is a property of the volume as
+// well as of the node: a format that stores no mode reports execute bits the
+// mount chose, and reporting those would be answering for the volume. The
+// volume is asked only when the caller wants the field, and only for a file.
+void fill_info(const okl::kstat& st, kal_u32 wanted, kal_node_info* out,
+               int volume_fd) {
     const kal_u32 self = out->self_size;
     kal_node_info v{};
     v.self_size   = self;
-    v.present     = KAL_INFO_ALL;
+    v.present     = KAL_INFO_ALL & ~KAL_INFO_EXECUTABLE;
     v.size        = static_cast<kal_u64>(st.size);
     v.modified_ns = static_cast<kal_u64>(st.mtime_sec) * 1000000000u
                   + static_cast<kal_u64>(st.mtime_nsec);
@@ -82,6 +143,16 @@ void fill_info(const okl::kstat& st, kal_u32 wanted, kal_node_info* out) {
     v.identity[1] = st.ino;
     v.kind        = kind_of(st.mode);
     v.writable    = (st.mode & 0200u) != 0 ? 1 : 0;
+
+    // A caller whose structure ends before the field is not given the position.
+    const kal_u32 reaches = static_cast<kal_u32>(
+        __builtin_offsetof(kal_node_info, executable) + sizeof v.executable);
+    if ((wanted & KAL_INFO_EXECUTABLE) != 0 && self >= reaches
+        && v.kind == kal_node_file
+        && (volume_props(volume_fd) & KAL_FS_PROP_EXECUTABLE) != 0) {
+        v.present   |= KAL_INFO_EXECUTABLE;
+        v.executable = (st.mode & 0111u) != 0 ? 1 : 0;
+    }
 
     const kal_u32 n = self < sizeof v ? self : (kal_u32)sizeof v;
     okl::copy(reinterpret_cast<char*>(out), reinterpret_cast<const char*>(&v), n);
@@ -242,7 +313,7 @@ int kal_fs_info(kal_dir base, const char* name, kal_uintptr len,
         }
         return okl::translate(r);
     }
-    fill_info(st, wanted, out);
+    fill_info(st, wanted, out, b);
     return kal_ok;
 }
 
@@ -252,7 +323,7 @@ int kal_fs_file_info(kal_file f, kal_u32 wanted, kal_node_info* out) {
     okl::kstat st{};
     const okl_long r = okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&st));
     if (okl::failed(r)) return okl::translate(r);
-    fill_info(st, wanted, out);
+    fill_info(st, wanted, out, fd);
     return kal_ok;
 }
 
@@ -277,7 +348,7 @@ int kal_fs_set_modified(kal_file f, kal_u64 modified_ns) {
 
 // The same, upon a NAME. Version 0.10.
 //
-// ⚠️⚠️ ADDED BECAUSE THE FORM ABOVE CANNOT REACH A DIRECTORY, AND A CONSUMER
+// ADDED BECAUSE THE FORM ABOVE CANNOT REACH A DIRECTORY, AND A CONSUMER
 // PAID FOR THAT. `kal_fs_set_modified' takes a `kal_file'; a directory is opened
 // as a `kal_dir'; there was no third thing. openkal-musl reached a lock
 // directory's timestamp by opening the directory for READING and setting the
@@ -299,6 +370,35 @@ int kal_fs_set_modified_at(kal_dir base, const char* name, kal_uintptr len,
     const okl_long r = okl::sys(okl::nr_utimensat, b,
                                 reinterpret_cast<okl_long>(t.buf),
                                 reinterpret_cast<okl_long>(times), 0);
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
+// Whether a node may be started, version 0.13. This kernel stores the property
+// as three bits, one per class of caller; the interface states one property,
+// so a class that may read the node may start it, and clearing clears all
+// three. Nothing else about the mode changes.
+int kal_fs_set_executable_at(kal_dir base, const char* name, kal_uintptr len,
+                             int executable) {
+    const int b = okl::unpack(base.h);
+    if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
+    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    if ((volume_props(b) & KAL_FS_PROP_EXECUTABLE) == 0) return kal_err_not_supported;
+
+    okl::kstat st{};
+    okl_long r = okl::sys(okl::nr_newfstatat, b, reinterpret_cast<okl_long>(t.buf),
+                          reinterpret_cast<okl_long>(&st), 0);
+    if (okl::failed(r)) return okl::translate(r);
+    const int k = kind_of(st.mode);
+    if (k == kal_node_directory) return kal_err_is_directory;
+    if (k != kal_node_file) return kal_err_invalid;
+
+    const unsigned mode = static_cast<unsigned>(st.mode) & 07777u;
+    const unsigned next = executable != 0 ? (mode | ((mode & 0444u) >> 2))
+                                          : (mode & ~0111u);
+    if (next == mode) return kal_ok;
+    // Resolves, as the enquiry above did, so the node changed is the node read.
+    r = okl::sys(okl::nr_fchmodat, b, reinterpret_cast<okl_long>(t.buf),
+                 static_cast<okl_long>(next));
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
@@ -405,57 +505,12 @@ int kal_fs_list_next(kal_dir, kal_uintptr* iter,
 // Case sensitivity and links are claimed only where the format is known to have
 // them.
 kal_uintptr kal_fs_props(kal_dir d) {
-    const int fd = okl::unpack(d.h);
-    // ⭐ LOCKS AND CAPACITY ARE IN THE CONSERVATIVE SET, and that is a claim
-    // about this kernel rather than about the volume: an open-file lock and
-    // `fstatfs' are answered by the VFS for every format beneath it, including
-    // the read-only ones --- a lock excludes writers a read-only volume does not
-    // have, which is a true answer and not a useful one. A format that could not
-    // would have to be excluded by name here, and this kernel has none.
-    const kal_uintptr conservative =
-        KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_ATOMIC_RENAME
-        | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
-    if (fd < 0) return 0;
-
-    okl::kstatfs sf{};
-    const okl_long r = okl::sys(okl::nr_fstatfs, fd, reinterpret_cast<okl_long>(&sf));
-    if (okl::failed(r)) return conservative;
-
-    switch (sf.f_type) {
-        // Formats with a case-sensitive namespace and nodes that name others.
-        case okl::fs_ext234: case okl::fs_btrfs: case okl::fs_xfs:
-        case okl::fs_f2fs:   case okl::fs_tmpfs: case okl::fs_overlay:
-        case okl::fs_zfs:    case okl::fs_bcachefs:
-            return conservative | KAL_FS_PROP_CASE_SENSITIVE
-                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS;
-
-        // Read-only formats: the nodes are there and none can be made, and a
-        // rename cannot be atomic because there is no rename.
-        case okl::fs_squashfs: case okl::fs_erofs:
-            return KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_CASE_SENSITIVE
-                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
-        case okl::fs_iso9660:
-            return KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_CASE_SENSITIVE
-                 | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
-
-        // The FAT family stores neither a case distinction nor a node that
-        // names another. `symlink' on such a volume reports EPERM, and this is
-        // where a caller learns that before it tries.
-        case okl::fs_msdos: case okl::fs_exfat:
-            return conservative;
-
-        // A case-insensitive namespace, with nodes that name others.
-        case okl::fs_ntfs: case okl::fs_ntfs3: case okl::fs_hfsplus:
-            return conservative | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS;
-
-        default:
-            return conservative;
-    }
+    return volume_props(okl::unpack(d.h));
 }
 
 // --- exclusion upon a range of a file --------------------------------------
 //
-// ⭐⭐ THE OPEN-FILE FORM, AND THE DIFFERENCE IS THE WHOLE REASON THIS IS
+// THE OPEN-FILE FORM, AND THE DIFFERENCE IS THE WHOLE REASON THIS IS
 // WORTH SPECIFYING.
 //
 // This kernel's oldest record lock is held by the PROCESS and is released as
@@ -466,7 +521,7 @@ kal_uintptr kal_fs_props(kal_dir d) {
 // open file description and ends when the last descriptor for it closes, and
 // when the program ends however it ends.
 //
-// ⚠️ Releasing on death is the half a caller cannot build for itself. Exclusion
+// Releasing on death is the half a caller cannot build for itself. Exclusion
 // it can: `KAL_OPEN_EXCLUSIVE' and a name beside the file. What nothing above
 // this line can do is release that name when its holder dies, so a program that
 // ended abnormally while holding one would be locked out of its own file for
@@ -491,7 +546,7 @@ static int lock_range(kal_file f, kal_u64 start, kal_u64 len,
     } while (okl::interrupted(r));
     if (!okl::failed(r)) return kal_ok;
 
-    // ⚠️⚠️ TWO VALUES MEAN ONE THING HERE, AND openkal NAMES ONE OF THEM.
+    // TWO VALUES MEAN ONE THING HERE, AND openkal NAMES ONE OF THEM.
     //
     // The standard this call comes from says a range another holder has is
     // reported as EITHER of two values, and leaves the choice to the system ---
@@ -500,7 +555,7 @@ static int lock_range(kal_file f, kal_u64 start, kal_u64 len,
     // caller polls upon; the other value translates to `permission', which a
     // caller reads as "asking again will not help" and acts upon by stopping.
     //
-    // ⭐ Narrowed to the attempt that does NOT wait, because that is the only
+    // Narrowed to the attempt that does NOT wait, because that is the only
     // one for which the two values carry this meaning. A permission failure on
     // any other path keeps its own answer.
     if (!wait && (-r == okl::e_acces || -r == okl::e_again)) return kal_err_again;
@@ -536,7 +591,7 @@ int kal_fs_capacity(kal_dir d, kal_u64* total, kal_u64* available) {
     // In bytes, because that is what the interface says and what a caller of it
     // wants; this kernel reports blocks and the size of one.
     const kal_u64 unit = static_cast<kal_u64>(sf.f_bsize);
-    // ⚠️ `f_bavail' AND NOT `f_bfree'. The second counts blocks the volume has,
+    // `f_bavail' AND NOT `f_bfree'. The second counts blocks the volume has,
     // including those only a privileged writer may reach; the first counts the
     // ones THIS program could actually use, which is the question asked.
     if (total)     *total     = static_cast<kal_u64>(sf.f_blocks) * unit;

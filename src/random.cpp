@@ -1,6 +1,6 @@
 // openkal.random on Linux --- getrandom(2).
 //
-// ⭐ THE KERNEL'S OWN CALL AND NOT `/dev/urandom`. The device would need a
+// THE KERNEL'S OWN CALL AND NOT `/dev/urandom`. The device would need a
 // descriptor, which needs a path, which a capability-oriented filesystem
 // deliberately does not hand out; and a program early enough in its life not to
 // have a filesystem yet still has this call. `getrandom` is the interface the
@@ -10,7 +10,7 @@
 
 namespace {
 
-// ⚠️ `GRND_NONBLOCK` IS NOT SET, AND THAT IS WHAT `BLOCKING` REPORTS.
+// `GRND_NONBLOCK` IS NOT SET, AND THAT IS WHAT `BLOCKING` REPORTS.
 //
 // Without it the call waits until the pool has been initialised, which on a
 // machine seconds into its first boot can be a real wait. Setting it instead
@@ -32,7 +32,7 @@ extern "C" int kal_random_fill(void* out, kal_uintptr len) {
                                     static_cast<okl_long>(len - filled),
                                     flags_blocking);
         if (r < 0) {
-            // ⚠️ THE BUFFER IS NOT RESTORED, AND THE CONTRACT SAYS IT NEED NOT
+            // THE BUFFER IS NOT RESTORED, AND THE CONTRACT SAYS IT NEED NOT
             // BE: a failed fill leaves the buffer unspecified rather than
             // unchanged. Restoring it would oblige this function to keep a copy
             // of what it was handed, which is a cost every successful call

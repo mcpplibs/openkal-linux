@@ -48,7 +48,7 @@ struct vector {
 
 // --- reporting a replacement that failed -----------------------------------
 //
-// ⚠️⚠️ THE REPLACEMENT HAPPENS IN THE DUPLICATE, SO ITS FAILURE WAS REPORTED TO
+// THE REPLACEMENT HAPPENS IN THE DUPLICATE, SO ITS FAILURE WAS REPORTED TO
 // NOBODY.
 //
 // A program is started here by duplicating this image and replacing the
@@ -59,7 +59,7 @@ struct vector {
 // something was wrong only by waiting and reading 127, which is exactly what a
 // program that RAN and exited 127 reports.
 //
-// ⭐ WHAT THAT COST, MEASURED BY A CONSUMER RATHER THAN HERE. openkal-musl
+// WHAT THAT COST, MEASURED BY A CONSUMER RATHER THAN HERE. openkal-musl
 // expresses `execve' as starting a program and ending with its status, so a
 // name that could not be started ended the CALLING program with 127 instead of
 // returning -1. musl's `execvp' issues one `execve' per PATH entry and needs
@@ -80,7 +80,7 @@ struct exec_report {
     int  fd[2] = { -1, -1 };
     bool armed = false;
 
-    // ⚠️ THE PIPE MUST NOT SIT WHERE THE DUPLICATE IS ABOUT TO PLACE SOMETHING.
+    // THE PIPE MUST NOT SIT WHERE THE DUPLICATE IS ABOUT TO PLACE SOMETHING.
     // The duplicate places streams at 0, 1 and 2 and granted directories at 3
     // and upwards, so a pipe that happened to hold one of those numbers would be
     // closed by the very placement whose failure it exists to report --- and the
@@ -159,7 +159,7 @@ inline void reap(okl_long child) {
 
 extern "C" {
 
-// Starting a program. ⭐ ONE FUNCTION SINCE 0.11, AND THE SAVING IS NOT ONLY IN
+// Starting a program. ONE FUNCTION SINCE 0.11, AND THE SAVING IS NOT ONLY IN
 // THE HEADER: this file used to hold THREE bodies of sixty lines that differed
 // by four. Every fix to the shared part --- and there have been several, the
 // exec-report pipe among them --- had to be made three times or be made once and
@@ -183,7 +183,7 @@ int kal_process_spawn(const kal_spawn* how,
     if (!okl::acceptable(path, path_len)) return kal_err_invalid;
     if (how->grant_count > 0 && how->grants == nullptr) return kal_err_invalid;
 
-    // ⚠️ REFUSED BEFORE ANYTHING IS STARTED, not after. A caller that asked for a
+    // REFUSED BEFORE ANYTHING IS STARTED, not after. A caller that asked for a
     // bound lifetime and received a program without one has been given a program
     // that outlives it --- which is the failure the flag exists to remove --- so an
     // unclaimed position is an error and not a thing to proceed without.
@@ -212,7 +212,7 @@ int kal_process_spawn(const kal_spawn* how,
 
     const bool bind = (how->flags & KAL_SPAWN_BOUND_LIFETIME) != 0;
 
-    // ⭐ THE UNIT, WHOSE IDENTITY HERE IS A PROCESS GROUP'S --- which is to say,
+    // THE UNIT, WHOSE IDENTITY HERE IS A PROCESS GROUP'S --- which is to say,
     // the identifier of whichever program formed it first. `join' is zero for the
     // first member, and the child then makes the group its own; a later member is
     // given the number to join.
@@ -233,7 +233,7 @@ int kal_process_spawn(const kal_spawn* how,
         if (ou != 0) okl::sys(okl::nr_dup3, ou, 1, 0);
         if (er != 0) okl::sys(okl::nr_dup3, er, 2, 0);
 
-        // ⚠️ dup3 REFUSES A DUPLICATION ONTO ITSELF, which the ordinary case
+        // dup3 REFUSES A DUPLICATION ONTO ITSELF, which the ordinary case
         // reaches whenever a granted directory already occupies the number it
         // is destined for. Refusing there is correct of dup3 --- the flags could
         // not be applied --- and here it means the descriptor is already in
@@ -244,7 +244,7 @@ int kal_process_spawn(const kal_spawn* how,
                 okl::sys(okl::nr_dup3, granted[i], want, 0);
         }
 
-        // ⭐ THE DIRECTORY THE PROGRAM RUNS IN, AND THIS LINE IS THE WHOLE OF IT.
+        // THE DIRECTORY THE PROGRAM RUNS IN, AND THIS LINE IS THE WHOLE OF IT.
         //
         // `execveat' below takes `b' as a dirfd, but that only RESOLVES the
         // name --- resolving a name is not entering a directory, which is what
@@ -252,7 +252,7 @@ int kal_process_spawn(const kal_spawn* how,
         // directory to enter, and a started program ran wherever this
         // implementation happened to be.
         //
-        // ⚠️ A FAILURE HERE MUST NOT REACH `execveat'. Running the right program
+        // A FAILURE HERE MUST NOT REACH `execveat'. Running the right program
         // in the wrong directory is precisely the silent wrongness this exists to
         // remove, so it is reported through the same pipe an exec failure uses.
         if (const okl_long e = okl::sys(okl::nr_fchdir, w); okl::failed(e)) {
@@ -261,7 +261,7 @@ int kal_process_spawn(const kal_spawn* how,
             for (;;) { }
         }
 
-        // ⭐ THE UNIT, ENTERED HERE AND NOT FROM THE PARENT: the parent's own
+        // THE UNIT, ENTERED HERE AND NOT FROM THE PARENT: the parent's own
         // `setpgid' on this child races the replacement below and loses once the
         // program has been replaced. Zero means "your own", which is how a group
         // comes into existence at all --- there is nothing to create beforehand,
@@ -279,7 +279,7 @@ int kal_process_spawn(const kal_spawn* how,
                 okl::sys(okl::nr_exit_group, 127);
         }
 
-        // ⚠️⚠️ THE BASE IS DUPLICATED SO THAT IT SURVIVES THE REPLACEMENT, AND
+        // THE BASE IS DUPLICATED SO THAT IT SURVIVES THE REPLACEMENT, AND
         // WITHOUT THIS A WHOLE CLASS OF PROGRAMS COULD NOT BE STARTED AT ALL.
         //
         // `execveat' with a dirfd and a relative name gives the program's name to
@@ -292,18 +292,18 @@ int kal_process_spawn(const kal_spawn* how,
         // replacement, by which time a close-on-exec dirfd is gone. The
         // interpreter is told the script does not exist.
         //
-        // ⭐ Measured in twenty lines of plain C, with everything else identical:
+        // Measured in twenty lines of plain C, with everything else identical:
         //
         //     dirfd WITH O_CLOEXEC       execveat -> ENOENT
         //     dirfd WITHOUT O_CLOEXEC    STARTED ok
         //
-        // ⚠️ It is not a property of one architecture. It was FOUND on aarch64,
+        // It is not a property of one architecture. It was FOUND on aarch64,
         // where every foreign binary needs the binfmt interpreter and so every
         // start failed --- and it was mistaken there for a limit of the emulator.
         // It reproduces natively on x86_64 with a `#!' script, which is what a
         // consumer meets on any machine.
         //
-        // ⚠️ Duplicated HERE, in the started image, and not where the preopens are
+        // Duplicated HERE, in the started image, and not where the preopens are
         // made: the caller's own descriptors stay close-on-exec, which is what
         // every other operation of this implementation relies upon. `dup' clears
         // the flag by definition, so the copy is the exec-visible one.
@@ -326,7 +326,7 @@ int kal_process_spawn(const kal_spawn* how,
         return okl::translate(why);
     }
 
-    // ⚠️ WRITTEN ONLY AFTER THE START HAS SUCCEEDED, and only when the unit was
+    // WRITTEN ONLY AFTER THE START HAS SUCCEEDED, and only when the unit was
     // new. The first member's identifier IS the group's, so this is where the
     // caller learns it; a later member joins one the caller already holds and
     // there is nothing to report.
@@ -404,7 +404,7 @@ int kal_process_wait(kal_process h, int* status, int* terminated_by_environment)
     return kal_ok;
 }
 
-// ⭐ ONE PROGRAM, WHATEVER UNIT IT IS IN.
+// ONE PROGRAM, WHATEVER UNIT IT IS IN.
 //
 // An earlier draft made this reach the whole group when the started program had
 // formed one, recovering that fact with `getpgid(pid) == pid'. It worked, and it
@@ -435,7 +435,7 @@ int kal_process_job_enter(kal_job* j) {
 // Every program in the unit, including ones this implementation never held a
 // handle to --- which is the whole reason a unit exists.
 //
-// ⚠️⚠️ AND IT IS THE SIGNAL THAT CANNOT BE DECLINED, WHICH IS A DECISION AND NOT
+// AND IT IS THE SIGNAL THAT CANNOT BE DECLINED, WHICH IS A DECISION AND NOT
 // A DETAIL.
 //
 // `kal_process_terminate' upon ONE program uses the polite one: a caller holds
@@ -445,18 +445,18 @@ int kal_process_job_enter(kal_job* j) {
 // one of them may ignore does not terminate the unit, it terminates the part of
 // it that agreed.
 //
-// ⭐ Measured with a consumer's own test: a shell that traps the polite signal
+// Measured with a consumer's own test: a shell that traps the polite signal
 // and loops. Asked politely, the unit outlived every deadline; the caller's
 // escalation could not help, because openkal has no vocabulary for "and this
 // time I mean it" --- it has no signals at all.
 //
-// ⇒ So the operation does what its name says. ⚠️ WHAT THIS COSTS IS REAL: a
+// ⇒ So the operation does what its name says. WHAT THIS COSTS IS REAL: a
 // member gets no chance to clean up, where on a system programmed directly a
 // caller would send the polite signal first and wait. A caller that wants that
 // still has it --- `kal_process_terminate' upon the member it holds --- and what it
 // cannot do is ask a unit politely.
 //
-// ⚠️ A GROUP IS NAMED BY A PROCESS IDENTIFIER, AND THOSE ARE REUSED. Once the
+// A GROUP IS NAMED BY A PROCESS IDENTIFIER, AND THOSE ARE REUSED. Once the
 // program that formed the group has ended and the numbers have wrapped, this can
 // reach a different group. That is what this system does --- every program that
 // calls `killpg' lives with it --- and the interface records it rather than
@@ -467,7 +467,7 @@ int kal_process_job_terminate(kal_job j) {
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
-// ⚠️ RELEASES NOTHING AND ENDS NOTHING. A group here is a number, not a resource,
+// RELEASES NOTHING AND ENDS NOTHING. A group here is a number, not a resource,
 // so there is no handle to close --- and the operation exists so that a caller
 // need not know that. Where the unit IS a resource, releasing it must still not
 // end its members; the interface says so at the declaration.
@@ -477,9 +477,9 @@ void kal_process_job_close(kal_job) { }
 // waited for continues, and this environment collects it when the caller exits.
 void kal_process_close(kal_process) { }
 
-// ⭐⭐ A WORD THE ENVIRONMENT SETS WHEN SOMEBODY HAS ASKED THIS PROGRAM TO END.
+// A WORD THE ENVIRONMENT SETS WHEN SOMEBODY HAS ASKED THIS PROGRAM TO END.
 //
-// ⚠️ A HANDLER AND NOT A WAITING CONTEXT, AND THE REASON IS WHICH ONE CAN BE
+// A HANDLER AND NOT A WAITING CONTEXT, AND THE REASON IS WHICH ONE CAN BE
 // ARMED WITHOUT DISTURBING A PROGRAM THAT NEVER ASKS. Consuming these signals
 // from a context of its own would require them BLOCKED IN EVERY context, and
 // blocking is per-context and inherited: a program that already had contexts
@@ -492,7 +492,7 @@ void kal_process_close(kal_process) { }
 // the wake is the same operation `kal_task_wake' performs --- issued here as the
 // raw call, because a handler may not enter code that takes a lock.
 //
-// ⚠️ THE RESTORER IS SUPPLIED HERE ON ONE ARCHITECTURE AND BY THE KERNEL ON THE
+// THE RESTORER IS SUPPLIED HERE ON ONE ARCHITECTURE AND BY THE KERNEL ON THE
 // OTHER. On x86_64 a disposition installed without SA_RESTORER faults on return
 // from the handler --- the C library normally supplies the three instructions,
 // and this implementation has no C library beneath it. On aarch64 the kernel
@@ -517,7 +517,7 @@ void stop_handler(int) {
              1 /* FUTEX_WAKE */, 0x7fffffff, 0, 0, 0);
 }
 
-// ⚠️ THE RESULT IS EXAMINED, AND IT WAS NOT WHEN THIS SHIPPED IN 0.11. An
+// THE RESULT IS EXAMINED, AND IT WAS NOT WHEN THIS SHIPPED IN 0.11. An
 // installation that failed would leave a word that can never change, and
 // answering the caller with one is `reporting success having done nothing' in
 // its exact form: the program asks whether its end has been requested, is told
@@ -537,12 +537,12 @@ bool arm_one(int signo) {
 
 }  // namespace
 
-// ⚠️ ARMED ON THE FIRST ENQUIRY AND NOT AT STARTUP. A program that never asks
+// ARMED ON THE FIRST ENQUIRY AND NOT AT STARTUP. A program that never asks
 // keeps the default action, which is what every program that has never heard of
 // this operation expects --- and it is the only arrangement under which adding
 // this operation changes nothing for anyone who does not use it.
 const kal_u32* kal_process_stop_requested(void) {
-    // ⚠️ THREE STATES AND NOT TWO: not yet tried, armed, refused. A second
+    // THREE STATES AND NOT TWO: not yet tried, armed, refused. A second
     // caller is told what the first found rather than arming again.
     int state = __atomic_load_n(&g_stop_armed, __ATOMIC_ACQUIRE);
     if (state == 0) {
@@ -559,7 +559,7 @@ kal_uintptr kal_process_props(void) {
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
          | KAL_PROCESS_PROP_JOB
-         // ⚠️ AGREES WITH `kal_process_stop_requested', because the header
+         // AGREES WITH `kal_process_stop_requested', because the header
          // defines null there as the absence this position reports. Read and
          // never armed: asking what an implementation can do must not install a
          // disposition, so the position is claimed until an installation has
