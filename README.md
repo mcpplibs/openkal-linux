@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.13.0"
+openkal = "0.14.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.13.0"
+openkal-linux = "0.14.0"
 ```
 
 ## Why it does not use a C library
