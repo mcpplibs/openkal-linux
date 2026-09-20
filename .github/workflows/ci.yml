@@ -221,6 +221,29 @@ jobs:
           bash .spec/tools/check-surface.sh --complete .spec/SURFACE.txt \
             $(find target -path '*/obj/*' -name '*.o' ! -name '*.m.o' ! -name 'conformance*' | tr '\n' ' ')
 
+      - name: The manifest's provides-interfaces is what the artefact provides
+        run: |
+          set -euo pipefail
+          # The array in mcpp.toml is a declaration, and a declaration is
+          # checked rather than trusted. The check is clause 9's surface
+          # comparison stopped one step earlier: the walk that decides whether
+          # each group is exported whole already answers which interfaces this
+          # implementation provides. Regenerating and diffing is therefore not
+          # a second derivation --- it is the same one.
+          objs=$(find target -path '*/obj/*' -name '*.o' ! -name '*.m.o' ! -name 'conformance*' | tr '\n' ' ')
+          [ -n "$objs" ] || { echo "::error::no objects to examine"; exit 1; }
+          bash .spec/tools/check-surface.sh --toml .spec/SURFACE.txt $objs > /tmp/derived.toml
+          # The manifest's own block, normalised the same way: the array body
+          # between `provides-interfaces = [` and the closing bracket.
+          awk '/^provides-interfaces = \[/{p=1} p{print} /^\]/{if(p)exit}' mcpp.toml > /tmp/declared.toml
+          if ! diff -u /tmp/declared.toml /tmp/derived.toml; then
+            echo "::error::mcpp.toml's provides-interfaces disagrees with the artefact"
+            echo "  regenerate it with:"
+            echo "    bash .spec/tools/check-surface.sh --toml .spec/SURFACE.txt \$(find target -name '*.o')"
+            exit 1
+          fi
+          echo "  ok  the declaration is the artefact's own answer"
+
       - name: The C++ declarations are complete
         run: |
           # The specification's own tool examines the C form. The module form is
