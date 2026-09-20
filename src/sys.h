@@ -506,9 +506,22 @@ enum : okl_long {
     tcgets = 0x5401, tcsets = 0x5402, tiocgwinsz = 0x5413,
 };
 
-// Positions within ktermios::lflag. Named here for the same reason the numbers
-// above are: they belong to the kernel and not to any library.
-enum : okl_u32 { t_icanon = 0000002u, t_echo = 0000010u };
+// Positions within ktermios::lflag and ktermios::iflag, and the two entries of
+// ktermios::cc that decide how long a read waits. Named here for the same
+// reason the numbers above are: they belong to the kernel and not to any
+// library.
+//
+// `t_isig', `t_ixon' and `t_iexten' are the three mechanisms by which this
+// kernel keeps a keystroke for itself --- the interrupt and its neighbours, the
+// pair that stops and starts output, and the one that takes the next keystroke
+// literally. KAL_TERM_PASS_CONTROL is the whole of them, because a program that
+// asked for every keystroke and was given two mechanisms out of three would
+// find one key missing and nothing to ask about it with.
+enum : okl_u32 {
+    t_isig = 0000001u, t_icanon = 0000002u, t_echo = 0000010u, t_iexten = 0100000u,
+};
+enum : okl_u32 { t_ixon = 0002000u };
+enum { v_time = 5, v_min = 6 };
 
 // --- openkal.net and openkal.datagram --------------------------------------
 //

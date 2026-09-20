@@ -56,6 +56,24 @@ void terminal_section() {
         check(m.e == kal_ok, "an interactive stream reports its mode");
         check(kal::terminal::set_mode(out, m.m) == kal_ok,
               "the mode that was read can be set back");
+
+        // THE POSITION VERSION 0.14 ADDED, UPON A TERMINAL THAT EXISTS. This
+        // implementation distinguishes it, so the answer here is the stronger
+        // of the two clause 6.2 permits: what was asked for is what is read
+        // back. Whether the keystroke then arrives as a byte is a question for
+        // something that can type, which is the pty probe a C environment above
+        // this implementation runs; what is established here is that the
+        // position reaches the kernel and that the terminal survives it.
+        using kal::terminal::pass_control;
+        const auto wanted = m.m | pass_control;
+        check(kal::terminal::set_mode(out, wanted) == kal_ok,
+              "every keystroke can be asked for");
+        const auto after = kal::terminal::get_mode(out);
+        check(after.e == kal_ok && after.m.has(pass_control),
+              "the position asked for is the position read back");
+        check(kal::terminal::set_mode(out, m.m) == kal_ok &&
+              kal::terminal::get_mode(out).m.bits == m.m.bits,
+              "the mode found is the mode left behind");
     } else {
         check(m.e == kal_err_not_supported,
               "a stream that is not interactive refuses get_mode");
