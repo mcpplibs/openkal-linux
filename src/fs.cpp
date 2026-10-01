@@ -3,6 +3,8 @@
 #include <openkal/fs.h>
 #include <openkal/memory.h>
 
+namespace okl { extern char** g_envp; }
+
 namespace {
 
 
@@ -20,11 +22,74 @@ struct preopen { const char* name; kal_uintptr len; okl_uptr handle; };
 
 char g_cwd[4096];
 
+constexpr kal_uintptr kMaxGrants = 16;
+
+// THE DIRECTORIES A STARTER GRANTED, WHEN THE PROGRAM WAS STARTED WITH GRANTS.
+//
+// They arrive as descriptors at 3 and upward, and their names in the variable
+// `kal_process_spawn' writes (see `vector::build_env' in process.cpp):
+//
+//     KAL_PREOPENS=<pid>{;<fd>,<len>,<name>}
+//
+// The value is read only when `<pid>' is this process, so one inherited through
+// a program that does not read it is not mistaken for a grant. A descriptor that
+// is not a directory is reported as a preopen this program may not use, which is
+// how an entry that could not be opened is reported anyway. Each descriptor is
+// marked to close on replacement as it is taken over, so that a grant reaches
+// the program it was made to and not that program's own children (SPEC.md
+// clause 7.13). The names point into the environment, which lives as long as
+// the program does.
+//
+// Answers false when there is no such value, which leaves the directories this
+// implementation supplies by default.
+bool granted(preopen* t, kal_uintptr* n) {
+    constexpr char key[] = "KAL_PREOPENS=";
+    constexpr okl_uptr key_len = sizeof key - 1;
+    const char* v = nullptr;
+    for (char** e = okl::g_envp; e && *e; ++e) {
+        okl_uptr i = 0;
+        while (i < key_len && (*e)[i] == key[i]) ++i;
+        if (i == key_len) { v = *e + key_len; break; }
+    }
+    if (v == nullptr) return false;
+
+    auto number = [&](okl_uptr& out) {
+        if (*v < '0' || *v > '9') return false;
+        out = 0;
+        while (*v >= '0' && *v <= '9') out = out * 10 + static_cast<okl_uptr>(*v++ - '0');
+        return true;
+    };
+    okl_uptr pid = 0;
+    if (!number(pid) || static_cast<okl_long>(pid) != okl::sys(okl::nr_getpid)) return false;
+
+    kal_uintptr k = 0;
+    while (*v == ';' && k < kMaxGrants) {
+        ++v;
+        okl_uptr fd = 0, len = 0;
+        if (!number(fd) || *v++ != ',' || !number(len) || *v++ != ',') return false;
+        for (okl_uptr i = 0; i < len; ++i) if (v[i] == '\0') return false;
+
+        okl::kstat st{};
+        const bool dir = !okl::failed(okl::sys(okl::nr_fstat, static_cast<okl_long>(fd),
+                                               reinterpret_cast<okl_long>(&st)))
+                      && (st.mode & okl::s_ifmt) == okl::s_ifdir;
+        if (dir) okl::sys(okl::nr_fcntl, static_cast<okl_long>(fd), okl::f_setfd, okl::fd_cloexec);
+        t[k++] = { v, len, dir ? okl::pack(static_cast<int>(fd)) : 0u };
+        v += len;
+    }
+    if (*v != '\0') return false;
+    *n = k;
+    return true;
+}
+
 preopen* table(kal_uintptr* count) {
-    static preopen t[2];
+    static preopen t[kMaxGrants];
+    static kal_uintptr n = 2;
     static bool opened = false;
     if (!opened) {
         opened = true;
+        if (granted(t, &n)) { if (count) *count = n; return t; }
+        n = 2;
 
         const okl_long n = okl::sys(okl::nr_getcwd, reinterpret_cast<okl_long>(g_cwd),
                                     static_cast<okl_long>(sizeof g_cwd));
@@ -45,7 +110,7 @@ preopen* table(kal_uintptr* count) {
         t[0] = { g_cwd, cwd_len, okl::failed(fd0) ? 0u : okl::pack(static_cast<int>(fd0)) };
         t[1] = { "/",   1,       okl::failed(fd1) ? 0u : okl::pack(static_cast<int>(fd1)) };
     }
-    if (count) *count = 2;
+    if (count) *count = n;
     return t;
 }
 
