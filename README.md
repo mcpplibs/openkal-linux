@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.14.0"
+openkal = "0.14.1"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.14.0"
+openkal-linux = "0.15.1"
 ```
 
 ## Why it does not use a C library
@@ -100,6 +100,29 @@ reports the absolute path rather than `"."`. A C library above openkal must both
 resolve an absolute path and report one, and a name of `"."` leaves it able to
 do only the first — which version 0.4 did, and which is why `getcwd` could not
 have worked above it.
+
+**A started program receives the three streams and its grants, and nothing
+else.** Clause 7.13. Every source is first moved above the positions being
+filled, so that placing one cannot overwrite another; everything above the
+grants is then marked to close on replacement, including what the calling
+program itself inherited (`close_range`, from Linux 5.11; `/proc/self/fd` or the
+descriptor limit before it). The program is started through a descriptor for its
+own file with `O_CLOEXEC`, and only a program that needs an interpreter --- a
+`#!` script, or a `binfmt_misc` binary --- keeps that descriptor: the kernel
+refuses such a program with `ENOENT` before the point of no return, and the start
+is repeated with the flag cleared. Such a script observes `$0` as `/dev/fd/<n>`.
+
+**Granted directories are named in the environment.** A grant arrives as a
+descriptor at 3 and upward, and its name in the variable
+`KAL_PREOPENS=<pid>{;<fd>,<len>,<name>}`, the arrangement of systemd's
+`LISTEN_FDS` and `LISTEN_FDNAMES`. `<pid>` is written by the started process
+itself, so a value inherited through a program that does not read it names no
+one. A program started with grants enumerates exactly those directories, the
+first of which is the directory it regards as the one it was started in; a
+program started without them enumerates the working directory and `/`, as
+before. A grant names directories to a program that confines itself to its
+preopens; it does not confine a program that opens `/` on its own, which is the
+environment's responsibility (clause 11, entry 6).
 
 **Interruption is retried, not reported.** A caller cannot distinguish an
 interrupted call from a genuine failure without knowledge of the platform, and
