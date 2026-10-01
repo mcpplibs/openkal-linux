@@ -8,6 +8,70 @@ namespace {
 
 constexpr okl_uptr kMaxEntries = 512;
 
+constexpr char     kPreopens[]  = "KAL_PREOPENS=";
+constexpr okl_uptr kPreopensLen = sizeof kPreopens - 1;
+constexpr okl_uptr kPidDigits   = 10;
+
+bool names_preopens(const char* s, kal_uintptr n) {
+    if (n < kPreopensLen) return false;
+    for (okl_uptr i = 0; i < kPreopensLen; ++i)
+        if (s[i] != kPreopens[i]) return false;
+    return true;
+}
+
+okl_uptr digits(okl_uptr v) {
+    okl_uptr n = 1;
+    while (v >= 10) { v /= 10; ++n; }
+    return n;
+}
+
+char* put_decimal(char* o, okl_uptr v) {
+    char b[24]; int i = 0;
+    do { b[i++] = static_cast<char>('0' + v % 10); v /= 10; } while (v);
+    while (i) *o++ = b[--i];
+    return o;
+}
+
+// Every descriptor from `from' upward is marked to close when the image is
+// replaced. `close_range' does it in one call from Linux 5.11; before that
+// kernel the descriptors the process has are listed from /proc/self/fd, and
+// where that is not mounted every number below the descriptor limit is tried.
+void close_on_exec_from(okl_long from) {
+    const okl_long r = okl::sys(okl::nr_close_range, from, static_cast<okl_long>(~0u),
+                                okl::close_range_cloexec);
+    if (!okl::failed(r)) return;
+
+    const okl_long dir = okl::sys(okl::nr_openat, okl::at_fdcwd,
+                                  reinterpret_cast<okl_long>("/proc/self/fd"),
+                                  okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+    if (!okl::failed(dir)) {
+        alignas(8) char buf[2048];
+        for (;;) {
+            const okl_long n = okl::sys(okl::nr_getdents64, dir,
+                                        reinterpret_cast<okl_long>(buf), sizeof buf);
+            if (n <= 0) break;
+            for (okl_long at = 0; at < n; ) {
+                const auto* d = reinterpret_cast<const okl::kdirent64*>(buf + at);
+                okl_long fd = 0; bool number = d->name[0] != '\0';
+                for (const char* c = d->name; *c; ++c) {
+                    if (*c < '0' || *c > '9') { number = false; break; }
+                    fd = fd * 10 + (*c - '0');
+                }
+                if (number && fd >= from && fd != dir)
+                    okl::sys(okl::nr_fcntl, fd, okl::f_setfd, okl::fd_cloexec);
+                at += d->reclen;
+            }
+        }
+        okl::sys(okl::nr_close, dir);
+        return;
+    }
+
+    okl_ulong lim[2] = { 1024, 1024 };
+    okl::sys(okl::nr_prlimit64, 0, okl::rlimit_nofile, 0, reinterpret_cast<okl_long>(lim));
+    for (okl_long fd = from; fd < static_cast<okl_long>(lim[0]); ++fd)
+        okl::sys(okl::nr_fcntl, fd, okl::f_setfd, okl::fd_cloexec);
+}
+
 // The counted arrays the interface takes become the terminated arrays the
 // kernel takes. Every allocation happens before the program is duplicated, so
 // that the duplicate performs nothing but two system calls: a duplicate of a
@@ -38,6 +102,82 @@ struct vector {
         }
         slots[n] = nullptr;
         return true;
+    }
+
+    // THE ENVIRONMENT, WHICH CARRIES THE NAMES OF THE GRANTED DIRECTORIES.
+    //
+    // A granted directory reaches the started program as a descriptor, and a
+    // descriptor carries no name. The names travel in one variable,
+    //
+    //     KAL_PREOPENS=<pid>{;<fd>,<len>,<name>}
+    //
+    // which the started program reads when it first enumerates its preopens
+    // (`table' in fs.cpp). It is the arrangement this environment already uses
+    // to hand a started program named descriptors --- systemd's LISTEN_FDS,
+    // LISTEN_FDNAMES and LISTEN_PID --- and it is bound to the process it was
+    // written for in the same way: `<pid>' is ten digits written by the
+    // duplicate once it knows its own number, so a value inherited through a
+    // program that does not read it, a shell for example, names no one when it
+    // arrives one generation further down.
+    //
+    // Every variable of that name the caller supplied is left out, so a value
+    // is never forwarded; one is added only when the caller asked for grants,
+    // and asking for none (a count of zero) is a value with no entries.
+    char*    pid_digits = nullptr;
+
+    bool build_env(const char** items, const kal_uintptr* lens, kal_uintptr n,
+                   const kal_preopen* grants, kal_uintptr g) {
+        if (n > kMaxEntries) { ok = false; return false; }
+        kal_uintptr kept = 0;
+        okl_uptr total = 0;
+        for (kal_uintptr i = 0; i < n; ++i) {
+            if (names_preopens(items[i], lens[i])) continue;
+            ++kept; total += lens[i] + 1;
+        }
+        okl_uptr extra = 0;
+        if (grants) {
+            extra = kPreopensLen + kPidDigits + 1;
+            for (kal_uintptr i = 0; i < g; ++i)
+                extra += 3 + digits(3 + i) + digits(grants[i].len) + grants[i].len;
+        }
+        slots_bytes = (kept + (grants ? 1 : 0) + 1) * sizeof(char*);
+        bytes_bytes = total + extra == 0 ? 1 : total + extra;
+        slots = static_cast<char**>(kal_alloc(slots_bytes, alignof(char*)));
+        bytes = static_cast<char*>(kal_alloc(bytes_bytes, 1));
+        if (!slots || !bytes) { ok = false; return false; }
+        okl_uptr at = 0, k = 0;
+        for (kal_uintptr i = 0; i < n; ++i) {
+            if (names_preopens(items[i], lens[i])) continue;
+            okl::copy(bytes + at, items[i], lens[i]);
+            bytes[at + lens[i]] = '\0';
+            slots[k++] = bytes + at;
+            at += lens[i] + 1;
+        }
+        if (grants) {
+            char* o = bytes + at;
+            slots[k++] = o;
+            okl::copy(o, kPreopens, kPreopensLen); o += kPreopensLen;
+            pid_digits = o;
+            okl::fill(o, '0', kPidDigits); o += kPidDigits;
+            for (kal_uintptr i = 0; i < g; ++i) {
+                *o++ = ';'; o = put_decimal(o, 3 + i);
+                *o++ = ','; o = put_decimal(o, grants[i].len);
+                *o++ = ',';
+                okl::copy(o, grants[i].name, grants[i].len); o += grants[i].len;
+            }
+            *o = '\0';
+        }
+        slots[k] = nullptr;
+        return true;
+    }
+
+    // In the duplicate, which is the first point at which the number is known.
+    void stamp(okl_long pid) const {
+        if (!pid_digits) return;
+        for (int i = static_cast<int>(kPidDigits) - 1; i >= 0; --i) {
+            pid_digits[i] = static_cast<char>('0' + pid % 10);
+            pid /= 10;
+        }
     }
 
     ~vector() {
@@ -192,19 +332,26 @@ int kal_process_spawn(const kal_spawn* how,
     okl::terminated p(path, path_len);
     if (!p.ok) return kal_err_invalid;
 
-    vector args, envs;
-    if (!args.build(argv, argv_lens, argc)) return kal_err_no_memory;
-    if (!envs.build(envp, envp_lens, envc)) return kal_err_no_memory;
-
     // Resolved before the duplication, because a failure after it would leave a
-    // child to be reaped and a caller with an error it cannot act upon.
+    // child to be reaped and a caller with an error it cannot act upon. A name
+    // travels in the environment, which cannot carry a zero byte.
     constexpr kal_uintptr max_grants = 16;
     if (how->grant_count > max_grants) return kal_err_invalid;
-    int granted[max_grants];
+    okl_long granted[max_grants];
     for (kal_uintptr i = 0; i < how->grant_count; ++i) {
-        granted[i] = okl::unpack(how->grants[i].dir.h);
-        if (granted[i] < 0) return kal_err_invalid;
+        const kal_preopen& g = how->grants[i];
+        const int fd = okl::unpack(g.dir.h);
+        if (fd < 0) return kal_err_invalid;
+        if (g.len > okl::max_name || (g.len > 0 && g.name == nullptr)) return kal_err_invalid;
+        for (kal_uintptr c = 0; c < g.len; ++c)
+            if (g.name[c] == '\0') return kal_err_invalid;
+        granted[i] = fd;
     }
+
+    vector args, envs;
+    if (!args.build(argv, argv_lens, argc)) return kal_err_no_memory;
+    if (!envs.build_env(envp, envp_lens, envc, how->grants, how->grant_count))
+        return kal_err_no_memory;
 
     const okl_long in = streams ? static_cast<okl_long>(streams->in.h)  : 0;
     const okl_long ou = streams ? static_cast<okl_long>(streams->out.h) : 0;
@@ -229,24 +376,54 @@ int kal_process_spawn(const kal_spawn* how,
     if (okl::failed(child)) { report.close_both(); return okl::translate(child); }
 
     if (child == 0) {
-        if (in != 0) okl::sys(okl::nr_dup3, in, 0, 0);
-        if (ou != 0) okl::sys(okl::nr_dup3, ou, 1, 0);
-        if (er != 0) okl::sys(okl::nr_dup3, er, 2, 0);
+        // WHAT THE STARTED PROGRAM RECEIVES IS THE THREE STREAMS AND THE GRANTED
+        // DIRECTORIES, AND NOTHING ELSE (SPEC.md clause 7.13).
+        //
+        // Every source is first moved above the positions being filled, because
+        // placing one source on its position must not overwrite another that
+        // still has to be read: a granted directory, a stream, the base or the
+        // working directory may each occupy a number between 0 and 3+n. Placing
+        // them one at a time where they stood is how a grant named `work'
+        // arrived as a second copy of `/', and how a placement overwrote the
+        // base the program's name is resolved under. A source that is moved has
+        // its own descriptor flag; `dup3' then clears it on the copy it places,
+        // including where the source happened to be the position itself ---
+        // which `dup3' refuses, and which used to leave the copy marked to
+        // close, so that the grant never arrived.
+        const okl_long top = static_cast<okl_long>(3 + how->grant_count);
+        auto lift = [&](okl_long fd) -> okl_long {
+            const okl_long r = okl::sys(okl::nr_fcntl, fd, okl::f_dupfd_cloexec, top);
+            if (okl::failed(r)) {
+                report.say(r);
+                okl::sys(okl::nr_exit_group, 127);
+                for (;;) { }
+            }
+            return r;
+        };
+        const okl_long sin = in != 0 ? lift(in) : 0;
+        const okl_long sou = ou != 0 ? lift(ou) : 0;
+        const okl_long ser = er != 0 ? lift(er) : 0;
+        for (kal_uintptr i = 0; i < how->grant_count; ++i) granted[i] = lift(granted[i]);
+        const okl_long base = lift(b);
+        const okl_long work = lift(w);
 
-        // dup3 REFUSES A DUPLICATION ONTO ITSELF, which the ordinary case
-        // reaches whenever a granted directory already occupies the number it
-        // is destined for. Refusing there is correct of dup3 --- the flags could
-        // not be applied --- and here it means the descriptor is already in
-        // place, so it is left alone rather than treated as a failure.
-        for (kal_uintptr i = 0; i < how->grant_count; ++i) {
-            const okl_long want = static_cast<okl_long>(3 + i);
-            if (granted[i] != want)
-                okl::sys(okl::nr_dup3, granted[i], want, 0);
-        }
+        if (sin != 0) okl::sys(okl::nr_dup3, sin, 0, 0);
+        if (sou != 0) okl::sys(okl::nr_dup3, sou, 1, 0);
+        if (ser != 0) okl::sys(okl::nr_dup3, ser, 2, 0);
+        for (kal_uintptr i = 0; i < how->grant_count; ++i)
+            okl::sys(okl::nr_dup3, granted[i], static_cast<okl_long>(3 + i), 0);
+
+        // What the CALLER itself inherited without the flag is not a handle it
+        // granted. A program that starts others inside a sandbox passes every
+        // descriptor it holds to them, and one of those reaching beyond the
+        // sandbox is exactly what the sandbox was for.
+        close_on_exec_from(top);
+
+        envs.stamp(okl::sys(okl::nr_getpid));
 
         // THE DIRECTORY THE PROGRAM RUNS IN, AND THIS LINE IS THE WHOLE OF IT.
         //
-        // `openat' below takes `b' as a dirfd, but that only RESOLVES the
+        // `openat' below takes the base as a dirfd, but that only RESOLVES the
         // name --- resolving a name is not entering a directory, which is what
         // the comment here used to get wrong. Until 0.11 there was no second
         // directory to enter, and a started program ran wherever this
@@ -255,7 +432,7 @@ int kal_process_spawn(const kal_spawn* how,
         // A FAILURE HERE MUST NOT REACH `execveat'. Running the right program
         // in the wrong directory is precisely the silent wrongness this exists to
         // remove, so it is reported through the same pipe an exec failure uses.
-        if (const okl_long e = okl::sys(okl::nr_fchdir, w); okl::failed(e)) {
+        if (const okl_long e = okl::sys(okl::nr_fchdir, work); okl::failed(e)) {
             report.say(e);
             okl::sys(okl::nr_exit_group, 127);
             for (;;) { }
@@ -309,17 +486,30 @@ int kal_process_spawn(const kal_spawn* how,
         // other programs in a sandbox hands it on to them, where
         // `/proc/self/fd/<n>/' reaches whatever the sandbox hid. So the program
         // itself is opened here, with `O_PATH' because it is only to be named
-        // and not read, and without `O_CLOEXEC' for the reason above, and
-        // `execveat' is given that descriptor and an empty name. The
-        // interpreter's `/dev/fd/<n>' then names the file, and nothing can be
-        // walked out of a descriptor for a file.
+        // and not read, and `execveat' is given that descriptor and an empty
+        // name. The interpreter's `/dev/fd/<n>' then names the file, and nothing
+        // can be walked out of a descriptor for a file.
+        //
+        // AND ONLY A PROGRAM THAT NEEDS AN INTERPRETER KEEPS EVEN THAT. The
+        // descriptor is opened with `O_CLOEXEC', and an ordinary executable,
+        // which the kernel holds open itself, starts with nothing left behind.
+        // A program that needs an interpreter is refused with ENOENT BEFORE the
+        // point of no return --- `binfmt_script' and `binfmt_misc' test whether
+        // the name will still be reachable and answer that it will not --- so
+        // the image is still here to clear the flag and ask again. The other
+        // sources of ENOENT on an open descriptor, an interpreter that does not
+        // exist, answer the same the second time.
+        //
+        // The descriptor is moved above the placed positions as well: where
+        // the caller had no standard input and supplied none, the lowest free
+        // number is 0, and a script would read its own descriptor as input.
         //
         // What is given up: a script now sees `$0' as `/dev/fd/<n>' and not as
         // a path under its directory, so one that locates its neighbours with
         // `dirname "$0"' no longer finds them. That is the price of leaving a
         // descriptor for the file and not for the directory, the same one
-        // `fexecve' charges. The descriptor still names the program, and a
-        // caller that sandboxes what it starts should close what it inherits.
+        // `fexecve' charges. The descriptor still names the program: it can be
+        // reopened through `/proc/self/fd/<n>', as `/proc/self/exe' can.
         //
         // Opened HERE, in the started image, and not where the preopens are made:
         // the caller's own descriptors stay close-on-exec, which is what every
@@ -327,18 +517,25 @@ int kal_process_spawn(const kal_spawn* how,
         //
         // A name that cannot be opened is reported exactly as one that cannot be
         // started is, through the same pipe.
-        const okl_long exe = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(p.buf),
-                                      okl::o_path, 0);
+        okl_long exe = okl::sys(okl::nr_openat, base, reinterpret_cast<okl_long>(p.buf),
+                                okl::o_path | okl::o_cloexec, 0);
         if (okl::failed(exe)) {
             report.say(exe);
             okl::sys(okl::nr_exit_group, 127);
             for (;;) { }
         }
+        if (exe < top) exe = lift(exe);
 
-        const okl_long why =
-            okl::sys(okl::nr_execveat, exe, reinterpret_cast<okl_long>(""),
-                     reinterpret_cast<okl_long>(args.slots),
-                     reinterpret_cast<okl_long>(envs.slots), okl::at_empty_path);
+        auto start = [&] {
+            return okl::sys(okl::nr_execveat, exe, reinterpret_cast<okl_long>(""),
+                            reinterpret_cast<okl_long>(args.slots),
+                            reinterpret_cast<okl_long>(envs.slots), okl::at_empty_path);
+        };
+        okl_long why = start();
+        if (why == -okl::e_noent) {
+            okl::sys(okl::nr_fcntl, exe, okl::f_setfd, 0);
+            why = start();
+        }
         // Reached only when the replacement did not happen, because when it does
         // there is nothing here to reach.
         report.say(why);

@@ -97,6 +97,7 @@ enum : okl_long {
     nr_clock_getres = 229, nr_exit_group = 231, nr_tgkill = 234,
     nr_openat = 257, nr_mkdirat = 258, nr_newfstatat = 262, nr_unlinkat = 263,
     nr_renameat = 264, nr_readlinkat = 267, nr_dup3 = 292, nr_execveat = 322,
+    nr_close_range = 436, nr_prlimit64 = 302,
     nr_dup2 = 33, nr_utimensat = 280, nr_symlinkat = 266, nr_fstatfs = 138,
     nr_getrandom = 318,
     // openkal 0.13: whether a node may be started
@@ -183,7 +184,8 @@ enum : okl_long {
     nr_sched_yield = 124, nr_kill = 129, nr_tgkill = 131, nr_gettid = 178,
     nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226,
     nr_clone = 220, nr_execve = 221, nr_wait4 = 260, nr_renameat = 38,
-    nr_dup3 = 24, nr_execveat = 281, nr_dup2 = -1, nr_fcntl = 25,
+    nr_dup3 = 24, nr_execveat = 281,
+    nr_close_range = 436, nr_prlimit64 = 261, nr_dup2 = -1, nr_fcntl = 25,
     nr_prctl = 167, nr_sched_getaffinity = 123, nr_getppid = 173,
     nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
     nr_getrandom = 278,
@@ -259,6 +261,10 @@ enum : okl_long {
     // A descriptor that only NAMES a node, and the empty name `execveat' accepts
     // for it. See the start in `kal_process_spawn'.
     o_path = 010000000, at_empty_path = 0x1000,
+
+    // The descriptor flag, set and cleared one descriptor at a time, and the
+    // form of `close_range' that sets it on every descriptor of a range.
+    f_setfd = 2, fd_cloexec = 1, close_range_cloexec = 4, rlimit_nofile = 7,
 
     // THE LOWEST FREE DESCRIPTOR AT OR ABOVE A BOUND, which is the one
     // primitive that moves a descriptor out of the way WITHOUT NAMING the
