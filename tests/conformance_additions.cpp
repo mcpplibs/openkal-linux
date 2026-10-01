@@ -181,6 +181,37 @@ int main() {
         kal_fs_remove(here(), prog, pn);
     }
 
+    // A started `#!' script is handed `/dev/fd/<n>' by the kernel and opens it
+    // after the replacement, so a descriptor has to be left behind for it. It
+    // must be one for the script and not for the directory the name was found
+    // in: a program that starts other programs under a sandbox passes every
+    // descriptor on, and a directory among them reaches outside it. The base
+    // and the working directory are the same here, so it is `.' that must not
+    // be among them.
+    {
+        const char* prog = "okl-fd-probe.tmp";
+        const kal_uintptr pn = std::strlen(prog);
+        check(put(prog, "#!/bin/sh\nfor f in /proc/self/fd/*; do\n"
+                        "  [ \"$f\" -ef . ] && exit 1\ndone\nexit 0\n"),
+              "a script is written");
+        check(kal_fs_set_executable_at(here(), prog, pn, 1) == kal_ok,
+              "the script is recorded as startable");
+
+        kal_process p{};
+        const char* argv[1] = { prog };
+        const kal_uintptr lens[1] = { pn };
+        const kal_spawn how{ here(), here(), nullptr, nullptr, 0, 0 };
+        check(kal_process_spawn(&how, prog, pn, argv, lens, 1,
+                                nullptr, nullptr, 0, nullptr, &p) == kal_ok,
+              "a `#!' script is started");
+        int status = -1, terminated = -1;
+        kal_process_wait(p, &status, &terminated);
+        check(terminated == 0 && status == 0,
+              "the script ran, and it inherited no descriptor for its base directory");
+        kal_process_close(p);
+        kal_fs_remove(here(), prog, pn);
+    }
+
     std::printf("openkal-linux: the operations version 0.5 added\n");
     return failures == 0 ? 0 : 1;
 }

@@ -246,7 +246,7 @@ int kal_process_spawn(const kal_spawn* how,
 
         // THE DIRECTORY THE PROGRAM RUNS IN, AND THIS LINE IS THE WHOLE OF IT.
         //
-        // `execveat' below takes `b' as a dirfd, but that only RESOLVES the
+        // `openat' below takes `b' as a dirfd, but that only RESOLVES the
         // name --- resolving a name is not entering a directory, which is what
         // the comment here used to get wrong. Until 0.11 there was no second
         // directory to enter, and a started program ran wherever this
@@ -279,8 +279,9 @@ int kal_process_spawn(const kal_spawn* how,
                 okl::sys(okl::nr_exit_group, 127);
         }
 
-        // THE BASE IS DUPLICATED SO THAT IT SURVIVES THE REPLACEMENT, AND
-        // WITHOUT THIS A WHOLE CLASS OF PROGRAMS COULD NOT BE STARTED AT ALL.
+        // WHAT THE STARTED PROGRAM KEEPS IS A DESCRIPTOR FOR THE PROGRAM, NOT
+        // FOR THE DIRECTORY IT WAS FOUND IN, AND WITHOUT A DESCRIPTOR AT ALL A
+        // WHOLE CLASS OF PROGRAMS COULD NOT BE STARTED.
         //
         // `execveat' with a dirfd and a relative name gives the program's name to
         // the kernel as `/dev/fd/<dirfd>/<name>'. That spelling is invisible to a
@@ -289,13 +290,13 @@ int kal_process_spawn(const kal_spawn* how,
         // needs an INTERPRETER: a `#!' script, or a binary of another
         // architecture registered through `binfmt_misc'. The kernel then starts
         // the interpreter and hands it that name to open --- AFTER the
-        // replacement, by which time a close-on-exec dirfd is gone. The
+        // replacement, by which time a close-on-exec descriptor is gone. The
         // interpreter is told the script does not exist.
         //
         // Measured in twenty lines of plain C, with everything else identical:
         //
-        //     dirfd WITH O_CLOEXEC       execveat -> ENOENT
-        //     dirfd WITHOUT O_CLOEXEC    STARTED ok
+        //     descriptor WITH O_CLOEXEC       execveat -> ENOENT
+        //     descriptor WITHOUT O_CLOEXEC    STARTED ok
         //
         // It is not a property of one architecture. It was FOUND on aarch64,
         // where every foreign binary needs the binfmt interpreter and so every
@@ -303,17 +304,41 @@ int kal_process_spawn(const kal_spawn* how,
         // It reproduces natively on x86_64 with a `#!' script, which is what a
         // consumer meets on any machine.
         //
-        // Duplicated HERE, in the started image, and not where the preopens are
-        // made: the caller's own descriptors stay close-on-exec, which is what
-        // every other operation of this implementation relies upon. `dup' clears
-        // the flag by definition, so the copy is the exec-visible one.
-        const okl_long visible = okl::sys(okl::nr_fcntl, b, okl::f_dupfd, 0);
-        const okl_long base = okl::failed(visible) ? b : visible;
+        // The descriptor that survives must not be the base. A copy of the base
+        // is a handle on a whole directory, often `/', and a program that runs
+        // other programs in a sandbox hands it on to them, where
+        // `/proc/self/fd/<n>/' reaches whatever the sandbox hid. So the program
+        // itself is opened here, with `O_PATH' because it is only to be named
+        // and not read, and without `O_CLOEXEC' for the reason above, and
+        // `execveat' is given that descriptor and an empty name. The
+        // interpreter's `/dev/fd/<n>' then names the file, and nothing can be
+        // walked out of a descriptor for a file.
+        //
+        // What is given up: a script now sees `$0' as `/dev/fd/<n>' and not as
+        // a path under its directory, so one that locates its neighbours with
+        // `dirname "$0"' no longer finds them. That is the price of leaving a
+        // descriptor for the file and not for the directory, the same one
+        // `fexecve' charges. The descriptor still names the program, and a
+        // caller that sandboxes what it starts should close what it inherits.
+        //
+        // Opened HERE, in the started image, and not where the preopens are made:
+        // the caller's own descriptors stay close-on-exec, which is what every
+        // other operation of this implementation relies upon.
+        //
+        // A name that cannot be opened is reported exactly as one that cannot be
+        // started is, through the same pipe.
+        const okl_long exe = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(p.buf),
+                                      okl::o_path, 0);
+        if (okl::failed(exe)) {
+            report.say(exe);
+            okl::sys(okl::nr_exit_group, 127);
+            for (;;) { }
+        }
 
         const okl_long why =
-            okl::sys(okl::nr_execveat, base, reinterpret_cast<okl_long>(p.buf),
+            okl::sys(okl::nr_execveat, exe, reinterpret_cast<okl_long>(""),
                      reinterpret_cast<okl_long>(args.slots),
-                     reinterpret_cast<okl_long>(envs.slots), 0);
+                     reinterpret_cast<okl_long>(envs.slots), okl::at_empty_path);
         // Reached only when the replacement did not happen, because when it does
         // there is nothing here to reach.
         report.say(why);

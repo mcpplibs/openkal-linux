@@ -256,19 +256,16 @@ enum : okl_long {
     o_creat = 0100, o_excl = 0200, o_trunc = 01000, o_append = 02000,
     o_cloexec = 02000000,
 
+    // A descriptor that only NAMES a node, and the empty name `execveat' accepts
+    // for it. See the start in `kal_process_spawn'.
+    o_path = 010000000, at_empty_path = 0x1000,
+
     // THE LOWEST FREE DESCRIPTOR AT OR ABOVE A BOUND, which is the one
     // primitive that moves a descriptor out of the way WITHOUT NAMING the
     // number it moves to --- and therefore without closing whatever a caller
     // already had there. `dup3' cannot do this: it is told the number, and it
     // closes what is on it.
     f_dupfd_cloexec = 1030,
-
-    // The same primitive WITHOUT the flag, which is the point of having both.
-    // A descriptor duplicated this way survives a replacement, and starting a
-    // program that needs an interpreter depends on exactly that --- see the
-    // duplication in `kal_process_spawn'. `dup' would do as well and this
-    // architecture pair does not agree on whether it exists.
-    f_dupfd = 0,
 
     // THE OPEN-FILE FORM AND NOT THE PROCESS FORM, WHICH IS THE WHOLE
     // DIFFERENCE.
