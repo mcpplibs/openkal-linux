@@ -16,6 +16,12 @@
 
 namespace okl {
 
+// The vectors the kernel placed at inception. `src/env.cpp` records them ---
+// from the stack when this implementation receives control, and from the
+// arguments a C library gives an initialiser when one receives control instead
+// --- and they are the only source of the program's own headers here.
+okl_ulong auxval(okl_ulong key);
+
 // The program's own thread-local segment, as the loader described it.
 struct tls_image {
     const unsigned char* data;   // the initialised part
@@ -57,17 +63,67 @@ inline void describe_tls(okl_ulong phdr, okl_ulong phent, okl_ulong phnum) {
 // the two architectures this implementation supports use one each.
 struct tls_block { void* base; okl_uptr bytes; okl_uptr align; void* tp; };
 
+// DESCRIBES THE PROGRAM'S OWN IMAGE IF NOTHING HAS, AND THE LAZINESS IS THE FIX
+// FOR A DEFECT THIS FILE HAD.
+//
+// `describe_tls' is called by `src/start.cpp', which is the entry point of a
+// program that carries no runtime. A program that DOES carry one is started by
+// that runtime instead, nothing described the image, `memsz' stayed zero, and a
+// context's storage was therefore allocated with the thread pointer at its
+// START instead of at its end. Every thread-local variable of a started context
+// was then addressed BELOW that allocation, and it did not fault: what lies
+// below an allocation is usually mapped, so a program's own thread-local
+// variables were written into whatever the allocator kept beside it. It took a
+// large enough variable to make the defect visible --- measured 2026-10-03, a
+// 24-byte one ended the kit's test program at the first instruction of a
+// context, where four bytes of it had been silently misplaced before.
+//
+// AND NOTHING WAS MISSING IN THAT ARRANGEMENT. The vectors are recorded in both
+// of them --- from the stack at entry, or from the initialiser a C library calls
+// --- and every arrangement reaches `make_tls' long after either. What was
+// missing was that anyone asked.
+inline void describe_self() {
+    if (image().known) return;
+    describe_tls(auxval(3 /* AT_PHDR */), auxval(4 /* AT_PHENT */),
+                 auxval(5 /* AT_PHNUM */));
+}
+
 inline tls_block make_tls(void* (*alloc)(okl_uptr, okl_uptr)) {
+    describe_self();
     const auto& im = image();
-    const okl_uptr align = im.align ? im.align : 16;
+    // TWO ALIGNMENTS, BECAUSE TWO DIFFERENT QUESTIONS ARE ASKED OF ONE NUMBER.
+    //
+    // The linker measures every offset backwards from `round_up(memsz, p_align)'
+    // --- the size of the segment as it laid it out --- and the region must be
+    // that size or the image it holds sits at the wrong offset within it. The
+    // ALLOCATION, separately, is asked to be at least sixteen-byte aligned,
+    // because the region is handed to code the compiler emitted and a smaller
+    // alignment is a promise the allocator was never asked for.
+    //
+    // They were one number, clamped up to sixteen, and the clamp is what made
+    // the two disagree: a program whose thread-local variables are all four- or
+    // eight-byte aligned has a segment aligned to that, the linker rounds its
+    // size to it, and a region rounded to sixteen instead puts every declared
+    // value a few bytes away from the variable that was declared with it. It is
+    // invisible until a variable is declared with a NON-ZERO value --- measured
+    // 2026-10-03, where the two differ by exactly the clamp.
+    const okl_uptr laid_out = im.align ? im.align : 1;
+    const okl_uptr align = laid_out < 16 ? 16 : laid_out;
     tls_block b{};
     b.align = align;
+
+    // A CONTEXT WHOSE STORAGE CANNOT BE LAID OUT IS REFUSED RATHER THAN GIVEN A
+    // WRONG ONE. The image is not described only where the program's own
+    // headers could not be reached at all, and a context established with a
+    // block that does not fit the segment would corrupt memory in a way the
+    // program cannot see. The caller of `kal_task_start' is told instead.
+    if (im.memsz == 0) return b;
 
 #if defined(__x86_64__)
     // Variant II: the storage lies below the thread pointer, and the word the
     // thread pointer addresses holds the thread pointer itself, which is how a
     // program obtains it without an instruction that reads the register.
-    const okl_uptr size = round_up(im.memsz, align);
+    const okl_uptr size = round_up(im.memsz, laid_out);
     b.bytes = size + 64;
     b.base  = alloc(b.bytes, align);
     if (!b.base) return b;
@@ -86,7 +142,7 @@ inline tls_block make_tls(void* (*alloc)(okl_uptr, okl_uptr)) {
     // Variant I: the storage lies above the thread pointer, after a gap of two
     // words reserved by the procedure call standard.
     const okl_uptr gap = round_up(16, align);
-    b.bytes = gap + round_up(im.memsz, align) + 64;
+    b.bytes = gap + round_up(im.memsz, laid_out) + 64;
     b.base  = alloc(b.bytes, align);
     if (!b.base) return b;
     auto* base = static_cast<unsigned char*>(b.base);

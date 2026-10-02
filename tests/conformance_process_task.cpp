@@ -164,6 +164,30 @@ int main() {
     kal_task_yield();
     check(kal_task_current() != 0, "the calling context has an identity");
 
+    // THE REGION THE CALLER STANDS ON. Containment is the observation rather
+    // than the shape of the numbers: a range that does not contain a local of
+    // the caller is a range describing something other than this context, which
+    // is the defect the operation was added for.
+    {
+        char here = 0;
+        void* base = nullptr;
+        kal_uintptr size = 0;
+        const int e = kal_task_stack(&base, &size);
+        check(e == kal_ok, "the calling context's stack bounds are reported");
+        if (e == kal_ok) {
+            const kal_uintptr at = reinterpret_cast<kal_uintptr>(&here);
+            const kal_uintptr b  = reinterpret_cast<kal_uintptr>(base);
+            check(size != 0 && b + size > b && at >= b && at - b < size,
+                  "the reported region contains the calling context");
+
+            void* again = nullptr;
+            kal_uintptr size_again = 0;
+            check(kal_task_stack(&again, &size_again) == kal_ok && again == base
+                      && size_again == size,
+                  "the same region is reported while the context runs");
+        }
+    }
+
     const char ok[] = "openkal-linux: process and task conformance\n";
     kal::write(kal::out(), ok, sizeof(ok) - 1);
     return failures == 0 ? 0 : 1;

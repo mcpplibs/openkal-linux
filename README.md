@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.14.1"
+openkal = "0.15.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.15.1"
+openkal-linux = "0.16.0"
 ```
 
 ## Why it does not use a C library
@@ -44,6 +44,46 @@ second and third.
 
 All eight. `tools/check-surface.sh --complete` in the specification package
 compares the exported names against `SURFACE.txt`.
+
+## The region a context stands on
+
+`kal_task_stack` reports the stack of the calling context, and this
+implementation answers it from two different sources because the two
+arrangements are told apart by who chose the stack.
+
+Where this implementation creates the context it also allocates the region, so
+the pair is recorded when the context begins and returned as it stands. That is
+exact and costs nothing.
+
+The context the program was started on has no such record, and its region is
+measured. `RLIMIT_STACK` alone is not the answer: the limit is a policy and the
+floor the kernel enforces is `mapping_end - RLIMIT_STACK`, where the mapping's
+end is not the address the program's first instruction sees --- the kernel
+places the arguments at the top of the mapping and moves the mapping's start
+down by a random shift. A region computed from a stack pointer alone therefore
+begins below the real floor, and below the real floor is where this system puts
+the program's own libraries.
+
+So the mapping is found by asking the kernel which pages are mapped, and the
+floor is the higher of the two bounds the kernel itself applies: the limit
+above, and one guard gap above the nearest mapping below, because the kernel
+refuses to grow the stack to within `stack_guard_gap` of another mapping.
+
+The gap is a kernel global this implementation cannot read, and the default of
+256 pages is what is applied. A kernel booted with a larger gap stops the stack
+above the base reported here, which is the direction a caller must not be wrong
+in; a kernel booted with a smaller one is reported a region smaller than it
+could have, which is the harmless direction.
+
+Both bounds were measured rather than derived, on 6.8.0: a descending write
+stopped at exactly `mapping_end - RLIMIT_STACK`, with one page below it
+unwritable and one page above it writable; and with a page mapped by the test
+itself inside the reservation, the same write stopped at exactly that page's end
+plus 256 pages.
+
+A program that carries a runtime of its own answers from that runtime instead
+(`pthread_getattr_np`), because in that arrangement the runtime is what owns the
+stacks and is what a program above openkal would ask for itself.
 
 ## Conformance
 

@@ -100,6 +100,10 @@ enum : okl_long {
     nr_close_range = 436, nr_prlimit64 = 302,
     nr_dup2 = 33, nr_utimensat = 280, nr_symlinkat = 266, nr_fstatfs = 138,
     nr_getrandom = 318,
+    // openkal 0.15: the region a context stands on is measured by asking the
+    // kernel which pages are mapped. The floor comes from the limit the kernel
+    // itself enforces, which `nr_prlimit64' above already names.
+    nr_mincore = 27,
     // openkal 0.13: whether a node may be started
     nr_fchmodat = 268,
     // openkal 0.11: the directory a started program runs in, and the unit it joins
@@ -189,6 +193,12 @@ enum : okl_long {
     nr_prctl = 167, nr_sched_getaffinity = 123, nr_getppid = 173,
     nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
     nr_getrandom = 278,
+    // openkal 0.15: the region a context stands on is measured by asking the
+    // kernel which pages are mapped. The floor comes from the limit the kernel
+    // itself enforces, which `nr_prlimit64' above already names --- and the two
+    // numbers differ from the other architecture's because this one takes the
+    // architecture-independent table for everything it can.
+    nr_mincore = 232,
     // openkal 0.13: whether a node may be started
     nr_fchmodat = 53,
     // openkal 0.11: the directory a started program runs in, and the unit it joins
