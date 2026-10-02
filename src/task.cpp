@@ -3,6 +3,12 @@
 #include <openkal/task.h>
 #include <openkal/memory.h>
 
+// The vectors the kernel placed at inception, which is where the page size is
+// stated. Defined in env.cpp, and declared here rather than taken from a
+// header because it is this implementation's own arrangement rather than a
+// name openkal has.
+namespace okl { okl_ulong auxval(okl_ulong key); }
+
 // Execution contexts come from one of two places, and which one is a property
 // of the program rather than of this implementation.
 //
@@ -82,6 +88,18 @@ extern "C" okl_long __okl_clone(int (*fn)(void*), void* stack, int flags, void* 
                                 int* ptid, void* tls, int* ctid);
 
 #else
+// THE HOST'S OWN ENQUIRY, WHICH IS A NAME THIS IMPLEMENTATION MAY TAKE IN THIS
+// ARRANGEMENT AND ONLY IN THIS ONE. A program that carries a runtime is a
+// program whose runtime owns the stacks, and `pthread_getattr_np' is how that
+// runtime states them; above a C library, taking the library's names is what
+// this arrangement is. Where the program carries no runtime, the measurement
+// above is used instead, because there is no library to ask and because a
+// program that defines every ordinary name would have this call resolve back
+// into itself.
+//
+// The macro is stated because the declaration is the GNU one on both C
+// libraries this arrangement is built above.
+#define _GNU_SOURCE 1
 #include <pthread.h>
 #include <sched.h>
 #endif
@@ -103,12 +121,268 @@ struct context {
 #endif
 };
 
+// --- the region a context stands on ------------------------------------------
+//
+// RECORDED WHERE THIS IMPLEMENTATION CHOSE THE STACK, MEASURED WHERE IT DID
+// NOT. Every context but the first runs on a region this implementation
+// allocated, so its bounds are known by construction and nothing has to be
+// asked. The context the program was started on has no such record, and its
+// region is measured rather than derived.
+//
+// WHY THE LIMIT ALONE IS NOT THE ANSWER, WHICH IS THE DEFECT THE OPERATION
+// EXISTS TO REMOVE. `RLIMIT_STACK' is a policy, and the floor the kernel
+// enforces is `mapping_end - RLIMIT_STACK' --- the end of the MAPPING, which is
+// not the address the program's first instruction sees. The kernel places the
+// arguments at the top of the mapping and moves the mapping's start down by a
+// random shift, so a region computed from a stack pointer alone begins below
+// the real floor by that shift. Below the real floor is where this system puts
+// the mappings of the program's own libraries, so the region would contain
+// another mapping: a caller that placed a guard at its base, or measured the
+// room above it, would be measuring a range the kernel will not grow the stack
+// into.
+//
+// WHAT IS MEASURED, AND WHAT IS STATED RATHER THAN MEASURED. The mapping is
+// found by asking the kernel which pages are mapped --- `mincore' answers that
+// and nothing else --- and its floor is the higher of two bounds the kernel
+// itself applies:
+//
+//   - `mapping_end - RLIMIT_STACK', which `prlimit64' states, and
+//   - one guard gap above the nearest mapping below, because the kernel
+//     refuses to grow the stack to within `stack_guard_gap' of another mapping.
+//
+// MEASURED ON 6.8.0, WITH THE CONTROL THAT SEPARATES THE TWO. A descending
+// write stopped at exactly `mapping_end - RLIMIT_STACK'; with one page mapped
+// by the test itself inside the reservation, the same write stopped at exactly
+// that page's end plus 256 pages, which is the kernel's default gap.
+//
+// THE GAP IS A KERNEL GLOBAL THIS IMPLEMENTATION CANNOT READ, and the default
+// is therefore what is applied. A kernel booted with a larger gap stops the
+// stack above the base reported here, so the region is reported larger than the
+// kernel will grow it --- the direction a caller must not be wrong in, and the
+// reason the default is applied rather than a smaller number. A kernel booted
+// with a smaller gap is reported a region smaller than it could have, which is
+// the harmless direction.
+//
+// The region is computed once per context: a stack does not move, and asking
+// again would measure the same mapping.
+struct self_bounds {
+    void*    base;
+    okl_uptr size;
+    int      state;   // 0 not yet asked, 1 answered
+};
+
+thread_local self_bounds g_self = { nullptr, 0, 0 };
+
+#ifdef OKL_STANDALONE
+
+// The kernel's page, read rather than assumed: `mincore' refuses an address
+// that is not page-aligned, and 4 KiB is not every architecture's answer.
+okl_uptr page_bytes() {
+    static okl_uptr cached = 0;
+    if (cached == 0) {
+        const okl_uptr n = static_cast<okl_uptr>(okl::auxval(6 /* AT_PAGESZ */));
+        cached = n != 0 ? n : 4096u;
+    }
+    return cached;
+}
+
+// The range one question covers. Bounded by the kernel's own workspace, which
+// is one byte per page; 4 MiB is 1024 bytes where the page is 4 KiB and 64
+// bytes where it is 64 KiB.
+constexpr okl_uptr kChunkBytes = 4u * 1024u * 1024u;
+constexpr okl_uptr kMaxVec     = 1024;
+
+okl_uptr pages_per_chunk() {
+    const okl_uptr n = kChunkBytes / page_bytes();
+    return n < kMaxVec && n != 0 ? n : kMaxVec;
+}
+
+// The kernel's answer when it would not say which pages are mapped. It is kept
+// apart from "not mapped" because the two lead to different reports: a range
+// derived from a refusal is a range derived from nothing, and the caller is
+// owed the refusal instead.
+thread_local okl_long g_refusal = 0;
+
+// Whether every page in the range is mapped. False with `mapped' unset means
+// at least one is not; false with `g_refusal' set means the environment would
+// not answer.
+bool range_state(okl_uptr base, okl_uptr pages, unsigned char* vec, bool* mapped) {
+    const okl_long r = okl::sys(okl::nr_mincore, static_cast<okl_long>(base),
+                                static_cast<okl_long>(pages * page_bytes()),
+                                reinterpret_cast<okl_long>(vec));
+    if (r == 0) { *mapped = true; return true; }
+    // A range that runs past the end of the address space is a range no page of
+    // which is mapped, which is the answer the search is looking for.
+    if (r == -okl::e_nomem || r == -okl::e_fault) { *mapped = false; return true; }
+    g_refusal = r;
+    return false;
+}
+
+// The end of the mapped run that contains `at': the first page at or above it
+// that is not mapped. One test per 4 MiB, and a page-by-page walk of the one
+// that contains the boundary.
+bool run_end(okl_uptr at, okl_uptr* end) {
+    const okl_uptr page = page_bytes();
+    const okl_uptr per  = pages_per_chunk();
+    const okl_uptr span = per * page;
+    unsigned char  vec[kMaxVec];
+
+    okl_uptr p = at & ~(page - 1);
+    for (;;) {
+        bool mapped = false;
+        if (!range_state(p, per, vec, &mapped)) return false;
+        if (!mapped) {
+            for (okl_uptr q = p; q < p + span; q += page) {
+                bool one = false;
+                if (!range_state(q, 1, vec, &one)) return false;
+                if (!one) { *end = q; return true; }
+            }
+        }
+        p += span;
+        if (p < at) { *end = ~static_cast<okl_uptr>(0) & ~(page - 1); return true; }
+    }
+}
+
+// The lowest page of the mapped run that contains `at'.
+bool run_start(okl_uptr at, okl_uptr* start) {
+    const okl_uptr page = page_bytes();
+    const okl_uptr per  = pages_per_chunk();
+    const okl_uptr span = per * page;
+    unsigned char  vec[kMaxVec];
+
+    okl_uptr hi = at & ~(page - 1);
+    for (;;) {
+        const okl_uptr base = hi > span ? hi - span : 0;
+        bool mapped = false;
+        if (!range_state(base, (hi - base) / page, vec, &mapped)) return false;
+        if (!mapped) {
+            // The run begins inside this chunk. Bisect on "every page from here
+            // up to the chunk's top is mapped", which is monotone in the
+            // address and is exactly what the boundary is.
+            okl_uptr lo = base, up = hi;
+            while (up - lo > page) {
+                const okl_uptr mid = lo + (((up - lo) / 2) & ~(page - 1));
+                bool whole = false;
+                if (mid == lo) break;
+                if (!range_state(mid, (hi - mid) / page, vec, &whole)) return false;
+                if (whole) up = mid; else lo = mid;
+            }
+            // `up' is the lowest page from which everything up to the chunk's
+            // top is mapped, and the pages below it are not.
+            *start = up;
+            return true;
+        }
+        if (base == 0) { *start = 0; return true; }
+        hi = base;
+    }
+}
+
+// The highest mapped page below `low', searching no further down than `limit'.
+// False when nothing is mapped in that window.
+bool obstacle_below(okl_uptr low, okl_uptr limit, okl_uptr* found) {
+    const okl_uptr page = page_bytes();
+    const okl_uptr per  = pages_per_chunk();
+    const okl_uptr span = per * page;
+    unsigned char  vec[kMaxVec];
+
+    okl_uptr hi = low;
+    while (hi > limit) {
+        const okl_uptr base = (hi - limit) > span ? hi - span : limit;
+        bool mapped = false;
+        if (!range_state(base, (hi - base) / page, vec, &mapped)) return false;
+        if (!mapped) {
+            // Something in this chunk is mapped. Bisect on "some page from here
+            // up to the chunk's top is mapped", which is monotone in the
+            // address; the highest address it holds at is the obstacle's top.
+            okl_uptr lo = base, up = hi;
+            while (up - lo > page) {
+                const okl_uptr mid = lo + (((up - lo) / 2) & ~(page - 1));
+                bool any = false;
+                if (mid == lo) break;
+                if (!range_state(mid, (hi - mid) / page, vec, &any)) return false;
+                if (any) lo = mid; else up = mid;
+            }
+            *found = lo;
+            return true;
+        }
+        hi = base;
+    }
+    return false;
+}
+
+// How far below the stack an unbounded limit is searched for the first mapping.
+// The kernel states no floor in that arrangement, so the region reported is the
+// part of the free space below the stack that was verified free, and this is
+// what bounds the verification. A caller is told a region of this size or the
+// whole free run, whichever is smaller, and never a region that was not
+// measured.
+constexpr okl_uptr kUnboundedSweep = 256u * 1024u * 1024u;
+
+// Measures the region the calling context stands on. False with `g_refusal' set
+// when the kernel would not answer.
+bool measure_self(okl_uptr at, void** base, okl_uptr* size) {
+    const okl_uptr page = page_bytes();
+    okl_uptr top = 0, low = 0;
+    if (!run_end(at, &top)) return false;
+    if (!run_start(at, &low)) return false;
+
+    // The limit the kernel enforces over the whole mapping, and the guard gap it
+    // enforces against the nearest mapping below.
+    okl_uptr rlim = 0;
+    okl_uptr lim[2] = { 0, 0 };
+    const okl_long r = okl::sys(okl::nr_prlimit64, 0, 3 /* RLIMIT_STACK */, 0,
+                                reinterpret_cast<okl_long>(lim));
+    if (r != 0) { g_refusal = r; return false; }
+    const okl_uptr gap = 256u * page;
+    if (lim[0] != ~static_cast<okl_uptr>(0) && lim[0] < top) rlim = lim[0];
+
+    // The floor from the limit: the smallest page-aligned address whose distance
+    // from the mapping's end does not exceed the limit the kernel applies.
+    okl_uptr floor = rlim != 0 ? (top - rlim + page - 1) & ~(page - 1) : 0;
+
+    // The floor from the mapping below. The window reaches one gap below the
+    // limit's floor, because a mapping just below it stops the stack a gap above
+    // itself --- which is above the limit's floor and is therefore the binding
+    // bound.
+    okl_uptr window = floor > gap ? floor - gap : 0;
+    if (rlim == 0) {
+        window = low > kUnboundedSweep ? low - kUnboundedSweep : 0;
+    }
+    if (window < low) {
+        okl_uptr obstacle = 0;
+        if (obstacle_below(low, window, &obstacle)) {
+            const okl_uptr by_gap = obstacle + page + gap;
+            if (by_gap > floor) floor = by_gap;
+        } else if (rlim == 0) {
+            // Nothing is mapped in the window, so the nearest mapping below is
+            // at or below its floor and the stack may grow to one gap above it.
+            floor = window + gap;
+        }
+    }
+    // A limit lowered after the mapping grew leaves the mapping larger than the
+    // limit; what is mapped is still the context's stack.
+    if (floor > low) floor = low;
+
+    *base = reinterpret_cast<void*>(floor);
+    *size = top - floor;
+    return *size != 0;
+}
+
+#endif  // OKL_STANDALONE
+
 #ifdef OKL_STANDALONE
 
 void* alloc_bridge(okl_uptr n, okl_uptr a) { return kal_alloc(n, a); }
 
 int run(void* p) {
     auto* c = static_cast<context*>(p);
+    // THE REGION IS RECORDED BEFORE ANYTHING ELSE RUNS IN THIS CONTEXT, because
+    // this is the last point at which this implementation knows it and the first
+    // at which the context can be asked. Nothing is measured: the region is the
+    // one kal_task_start allocated, and the pair is exact.
+    g_self.base = c->stack;
+    g_self.size = c->stack_bytes;
+    g_self.state = 1;
     c->entry(c->arg);
     return 0;
 }
@@ -220,6 +494,52 @@ kal_uintptr kal_task_current(void) {
     static thread_local int cached = 0;
     if (cached == 0) cached = static_cast<int>(okl::sys(okl::nr_gettid));
     return static_cast<kal_uintptr>(cached);
+}
+
+// The stack the calling context runs on. Version 0.15.
+//
+// THE TWO ARRANGEMENTS ANSWER FROM DIFFERENT SOURCES, and the difference is
+// which party chose the stack. Where this implementation creates the context it
+// also allocates the stack, so the pair was recorded when the context began and
+// is returned as it stands. Where the program carries its own runtime, the
+// stack is that runtime's and the runtime is asked --- which is the same
+// enquiry a program above openkal would make for itself, and the only answer
+// that agrees with what the environment will actually do.
+int kal_task_stack(void** base, kal_uintptr* size) {
+    if (base == nullptr || size == nullptr) return kal_err_invalid;
+
+#ifdef OKL_STANDALONE
+    if (g_self.state == 0) {
+        char here = 0;
+        void* b = nullptr;
+        okl_uptr n = 0;
+        if (!measure_self(reinterpret_cast<okl_uptr>(&here), &b, &n)) {
+            // The kernel would not say which pages are mapped, so there is no
+            // measured region to report. The condition is the kernel's, mapped
+            // onto the closed set --- and it is not "unsupported", which clause
+            // 6.1 forbids an implementation of a provided interface to report.
+            return okl::translate(g_refusal);
+        }
+        g_self.base = b;
+        g_self.size = n;
+        g_self.state = 1;
+    }
+    *base = g_self.base;
+    *size = static_cast<kal_uintptr>(g_self.size);
+    return kal_ok;
+#else
+    // The host's own answer, in the form POSIX states it. `pthread_attr_getstack'
+    // reports the usable region and not the guard page below it.
+    pthread_attr_t attr;
+    void* b = nullptr;
+    size_t n = 0;
+    if (::pthread_getattr_np(::pthread_self(), &attr) != 0) return kal_err_io;
+    if (::pthread_attr_getstack(&attr, &b, &n) != 0) return kal_err_io;
+    if (b == nullptr || n == 0) return kal_err_io;
+    *base = b;
+    *size = static_cast<kal_uintptr>(n);
+    return kal_ok;
+#endif
 }
 
 // How many contexts can run at the same moment. Version 0.10.
