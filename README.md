@@ -8,7 +8,7 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.15.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.16.0"
+openkal-linux = "0.16.1"
 ```
 
 ## Why it does not use a C library
@@ -84,6 +84,23 @@ plus 256 pages.
 A program that carries a runtime of its own answers from that runtime instead
 (`pthread_getattr_np`), because in that arrangement the runtime is what owns the
 stacks and is what a program above openkal would ask for itself.
+
+## A defect this version repairs
+
+0.16.0 added the storage this implementation keeps for the region a context
+stands on, and that storage made a latent defect of `src/tls.h` visible: the
+thread-local segment's alignment was clamped up to sixteen where the block's
+SIZE is computed, and the size has to be the one the linker measured every
+variable's offset against. On a segment stating `p_align = 8, p_memsz = 56` the
+linker laid the variables out at `tp - 56` while the region was built 64 bytes
+deep, so the image of the program's thread-local storage sat eight bytes below
+the variables that name it. A program whose thread-local variables are
+initialised then reads another variable's bytes, and a C++ program's
+`thread_local` object can find its guard byte non-zero and never be constructed
+--- which is how openkal-llvm-runtime's own probe reported it.
+
+The clamp now applies to the ALLOCATION, which wants sixteen, and not to the
+size, which is the linker's.
 
 ## Conformance
 

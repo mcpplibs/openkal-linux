@@ -53,7 +53,26 @@ inline void describe_tls(okl_ulong phdr, okl_ulong phent, okl_ulong phnum) {
         im.data   = reinterpret_cast<const unsigned char*>(p->vaddr);
         im.filesz = static_cast<okl_uptr>(p->filesz);
         im.memsz  = static_cast<okl_uptr>(p->memsz);
-        im.align  = p->align < 16 ? 16 : static_cast<okl_uptr>(p->align);
+        // THE ALIGNMENT IS KEPT AS THE LOADER STATED IT, AND THE CLAMP THAT
+        // USED TO BE HERE WAS HALF OF A DEFECT.
+        //
+        // Every thread-local address is `tp + st_value - tls_size', where
+        // `tls_size' is the block the LINKER laid out --- `round_up(p_memsz,
+        // p_align)' --- and a region of any other size puts the image it holds
+        // at the wrong offset within it. Clamping the alignment up to sixteen
+        // HERE lost the number the size has to be computed from, and the image
+        // then sat below the variables that name it: measured 2026-10-03 on a
+        // segment stating `p_align = 8, p_memsz = 56', whose variables the
+        // linker put at `tp - 56' while the region was built 64 bytes deep.
+        //
+        // Two four-byte thread-local variables, each initialised with a
+        // different value, read each other's bytes; and openkal-llvm-runtime's
+        // own probe reported it as a `thread_local' whose constructor never
+        // ran, because its guard byte had moved onto a non-zero neighbour.
+        //
+        // The clamp belongs to `make_tls', which applies it to the ALLOCATION
+        // and not to the size.
+        im.align  = static_cast<okl_uptr>(p->align);
         return;
     }
 }
@@ -91,22 +110,24 @@ inline void describe_self() {
 inline tls_block make_tls(void* (*alloc)(okl_uptr, okl_uptr)) {
     describe_self();
     const auto& im = image();
-    // TWO ALIGNMENTS, BECAUSE TWO DIFFERENT QUESTIONS ARE ASKED OF ONE NUMBER.
+    // TWO ALIGNMENTS, BECAUSE TWO DIFFERENT QUESTIONS ARE ASKED OF ONE NUMBER,
+    // AND ASKING BOTH OF ONE NUMBER WAS A DEFECT.
     //
-    // The linker measures every offset backwards from `round_up(memsz, p_align)'
-    // --- the size of the segment as it laid it out --- and the region must be
-    // that size or the image it holds sits at the wrong offset within it. The
-    // ALLOCATION, separately, is asked to be at least sixteen-byte aligned,
-    // because the region is handed to code the compiler emitted and a smaller
-    // alignment is a promise the allocator was never asked for.
+    // The SIZE is the linker's: `round_up(p_memsz, p_align)', the block every
+    // thread-local offset was measured backwards from, so that the image copied
+    // to the start of the region is where the variables' addresses say it is.
+    // The ALLOCATION is asked for at least sixteen bytes of alignment, because
+    // the region is handed to code the compiler emitted and a smaller alignment
+    // is a promise the allocator was never asked for.
     //
-    // They were one number, clamped up to sixteen, and the clamp is what made
-    // the two disagree: a program whose thread-local variables are all four- or
-    // eight-byte aligned has a segment aligned to that, the linker rounds its
-    // size to it, and a region rounded to sixteen instead puts every declared
-    // value a few bytes away from the variable that was declared with it. It is
-    // invisible until a variable is declared with a NON-ZERO value --- measured
-    // 2026-10-03, where the two differ by exactly the clamp.
+    // They were one number, clamped up to sixteen. On a segment stating
+    // `p_align = 8, p_memsz = 56' --- measured 2026-10-03 with two initialised
+    // thread-local variables --- the linker laid the variables out at `tp - 56'
+    // and the clamp built a region 64 bytes deep, so the image sat eight bytes
+    // below them and each variable read the other's bytes. openkal-linux 0.16.0
+    // shipped that: the specification package's own kit test passed, because a
+    // four-byte variable of this implementation's own was all the storage there
+    // was, and it took this round's twenty-four to move anything into the way.
     const okl_uptr laid_out = im.align ? im.align : 1;
     const okl_uptr align = laid_out < 16 ? 16 : laid_out;
     tls_block b{};
