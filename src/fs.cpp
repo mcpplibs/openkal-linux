@@ -254,10 +254,48 @@ kal_uintptr put_name(const char* src, kal_uintptr n,
 // calling.
 struct listing {
     int      fd;
+    int      dir;      // the descriptor of the directory it was begun upon
+    listing* next;
     okl_uptr used;
     okl_uptr pos;
     char     buf[8192];
 };
+
+// THE ENUMERATIONS NOT YET READ TO THE END, BECAUSE CLOSING THE DIRECTORY MUST
+// END THEM. fs.h releases an iterator "by reading past the end or by closing
+// the directory that produced it", and the descriptor a listing holds is its
+// own, so closing the directory's descriptor does not reach it. Measured before
+// this list existed: a C library above that opened a directory larger than its
+// buffer, read one entry and closed it, 64 times, was left holding 64 more
+// descriptors.
+//
+// The lock spins rather than suspends, because suspending would make openkal.fs
+// depend upon openkal.task, as src/memory.cpp says of its own.
+listing*     g_listings = nullptr;
+volatile int g_listings_held = 0;
+
+void listings_lock() {
+    while (__atomic_exchange_n(&g_listings_held, 1, __ATOMIC_ACQUIRE)) okl::sys(okl::nr_sched_yield);
+}
+void listings_unlock() { __atomic_store_n(&g_listings_held, 0, __ATOMIC_RELEASE); }
+
+// Ends every listing begun upon `dir', or `one' alone where `dir' is negative.
+// What is ended is unlinked under the lock and released after it.
+void listings_end(int dir, listing* one) {
+    listing* done = nullptr;
+    listings_lock();
+    for (listing** p = &g_listings; *p != nullptr;) {
+        listing* s = *p;
+        if (dir >= 0 ? s->dir == dir : s == one) { *p = s->next; s->next = done; done = s; }
+        else p = &s->next;
+    }
+    listings_unlock();
+    while (done != nullptr) {
+        listing* s = done; done = s->next;
+        okl::sys(okl::nr_close, s->fd);
+        kal_free(s, sizeof(listing), alignof(listing));
+    }
+}
 
 }  // namespace
 
@@ -312,7 +350,11 @@ int kal_fs_open(kal_dir base, const char* name, kal_uintptr len,
 
 void kal_fs_close_dir(kal_dir d) {
     const int fd = okl::unpack(d.h);
-    if (fd >= 0) { okl::retire(d.h); okl::sys(okl::nr_close, fd); }
+    if (fd < 0) return;
+    // Before the close, because after it the number may already name another
+    // directory whose enumerations are not this one's.
+    listings_end(fd, nullptr);
+    okl::retire(d.h); okl::sys(okl::nr_close, fd);
 }
 
 void kal_fs_close_file(kal_file f) {
@@ -515,7 +557,8 @@ int kal_fs_list_begin(kal_dir d, kal_uintptr* iter) {
     if (okl::failed(own)) return okl::translate(own);
     auto* s = static_cast<listing*>(kal_alloc(sizeof(listing), alignof(listing)));
     if (s == nullptr) { okl::sys(okl::nr_close, own); return kal_err_no_memory; }
-    s->fd = static_cast<int>(own); s->used = 0; s->pos = 0;
+    s->fd = static_cast<int>(own); s->dir = fd; s->used = 0; s->pos = 0;
+    listings_lock(); s->next = g_listings; g_listings = s; listings_unlock();
     *iter = reinterpret_cast<kal_uintptr>(s);
     return kal_ok;
 }
@@ -532,8 +575,7 @@ int kal_fs_list_next(kal_dir, kal_uintptr* iter,
                                         static_cast<okl_long>(sizeof s->buf));
             if (okl::interrupted(r)) continue;
             if (okl::failed(r) || r == 0) {
-                okl::sys(okl::nr_close, s->fd);
-                kal_free(s, sizeof(listing), alignof(listing));
+                listings_end(-1, s);
                 *iter = 0;
                 if (name_len) *name_len = 0;
                 return okl::failed(r) ? okl::translate(r) : kal_ok;

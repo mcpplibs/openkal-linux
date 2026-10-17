@@ -95,6 +95,48 @@ int main() {
     check(kal_fs_open(d, "inner", 5, kal::fs::open::read.bits, &after) != kal_ok,
           "a released handle is not treated as valid");
 
+    // An enumeration left part-way is ended by closing the directory that
+    // produced it, which fs.h states. Counted in the kernel's own table, through
+    // the whole file system this implementation supplies as a directory.
+    {
+        kal_dir slash{}; bool have_root = false;
+        for (kal_uintptr i = 0; i < kal::fs::preopen_count(); ++i) {
+            char nm[512]; kal_uintptr nl = 0; kal_dir p{};
+            if (kal_fs_preopen(i, &p, nm, sizeof nm, &nl) == kal_ok && nl == 1 && nm[0] == '/') {
+                slash = p; have_root = true;
+            }
+        }
+        auto open_now = [&]() -> int {
+            kal_dir fds{}; kal_uintptr it = 0; int n = 0;
+            if (kal_fs_open_dir(slash, "proc/self/fd", 12, &fds) != kal_ok) return -1;
+            if (kal_fs_list_begin(fds, &it) == kal_ok) {
+                for (;;) {
+                    char name[512]; kal_uintptr len = 0; int kind = 0;
+                    if (kal_fs_list_next(fds, &it, name, sizeof name, &len, &kind) != kal_ok || it == 0) break;
+                    ++n;
+                }
+            }
+            kal_fs_close_dir(fds);
+            return n;
+        };
+        if (have_root) {
+            const int before = open_now();
+            check(before >= 0, "the open descriptors are counted through proc/self/fd");
+            if (before >= 0) {
+                for (int i = 0; i < 64; ++i) {
+                    kal_dir again{}; kal_uintptr it = 0;
+                    if (kal_fs_open_dir(root, "okl_dir", 7, &again) != kal_ok) break;
+                    if (kal_fs_list_begin(again, &it) == kal_ok) {
+                        char name[512]; kal_uintptr len = 0; int kind = 0;
+                        kal_fs_list_next(again, &it, name, sizeof name, &len, &kind);
+                    }
+                    kal_fs_close_dir(again);
+                }
+                check(open_now() == before, "closing a directory ends an enumeration left part-way");
+            }
+        }
+    }
+
     check(kal_fs_remove(root, "okl_dir/inner", 13) == kal_ok, "the inner file is removed");
     check(kal_fs_remove(root, "okl_dir", 7) == kal_ok, "the directory is removed");
     check(kal_fs_remove(root, "okl_probe.txt", 13) == kal_ok, "the file is removed");
