@@ -534,6 +534,14 @@ enum : okl_u32 {
     t_isig = 0000001u, t_icanon = 0000002u, t_echo = 0000010u, t_iexten = 0100000u,
 };
 enum : okl_u32 { t_ixon = 0002000u };
+// `t_istrip', `t_inlcr', `t_igncr' and `t_icrnl' are the mechanisms by which
+// this kernel alters input on its way: clearing the high bit, rewriting a line
+// feed into a carriage return, discarding a carriage return, and rewriting a
+// carriage return into a line feed. KAL_TERM_PASS_INPUT is the whole of them,
+// for the reason given above for the three that keep a keystroke. The last is
+// the one this kernel applies ordinarily, and the one that made the return key
+// and Ctrl+J the same byte (mcpplibs/openkal#48).
+enum : okl_u32 { t_istrip = 0000040u, t_inlcr = 0000100u, t_igncr = 0000200u, t_icrnl = 0000400u };
 enum { v_time = 5, v_min = 6 };
 
 // --- openkal.net and openkal.datagram --------------------------------------

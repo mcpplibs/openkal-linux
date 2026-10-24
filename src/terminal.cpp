@@ -25,12 +25,18 @@ namespace {
 // which some of them had been released reads as clear and is restored to the
 // set this kernel ordinarily reserves, which is the cost the specification
 // records beside the position.
+// KAL_TERM_PASS_INPUT IS READ FROM FOUR FLAGS, for the same reason: it states
+// that nothing typed is altered, which holds only where every mechanism by which
+// this kernel alters input is off.
+constexpr okl_u32 kAlters = okl::t_istrip | okl::t_inlcr | okl::t_igncr | okl::t_icrnl;
+
 kal_uintptr mode_of(const okl::ktermios& t) {
     kal_uintptr m = 0;
     if ((t.lflag & okl::t_icanon) != 0) m |= KAL_TERM_LINE_EDIT;
     if ((t.lflag & okl::t_echo)   != 0) m |= KAL_TERM_ECHO;
     if ((t.lflag & (okl::t_isig | okl::t_iexten)) == 0 &&
         (t.iflag & okl::t_ixon) == 0)   m |= KAL_TERM_PASS_CONTROL;
+    if ((t.iflag & kAlters) == 0)       m |= KAL_TERM_PASS_INPUT;
     return m;
 }
 
@@ -91,6 +97,14 @@ int kal_terminal_set_mode(kal_stream s, kal_uintptr mode) {
             t.lflag |=  (okl::t_isig | okl::t_iexten);
             t.iflag |=   okl::t_ixon;
         }
+    }
+
+    // The same rule, for the position that stands for four flags. Clearing it
+    // restores what this kernel ordinarily applies, which is the rewriting of a
+    // carriage return into a line feed and none of the other three.
+    if (((mode ^ in_effect) & KAL_TERM_PASS_INPUT) != 0) {
+        if ((mode & KAL_TERM_PASS_INPUT) != 0) t.iflag &= ~kAlters;
+        else                                   t.iflag |=  okl::t_icrnl;
     }
 
     // AND A MODE IS NOT A WAY TO END THE INPUT. With line assembly off, how

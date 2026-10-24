@@ -5,6 +5,7 @@
 // makes a program confinable by the directory it was given.
 import openkal.fs;
 import openkal.stream;
+import openkal.task;
 
 namespace {
 int failures = 0;
@@ -94,6 +95,108 @@ int main() {
     kal_file after{};
     check(kal_fs_open(d, "inner", 5, kal::fs::open::read.bits, &after) != kal_ok,
           "a released handle is not treated as valid");
+
+    // An enumeration left part-way is ended by closing the directory that
+    // produced it, which fs.h states. Counted in the kernel's own table, through
+    // the whole file system this implementation supplies as a directory.
+    {
+        kal_dir slash{}; bool have_root = false;
+        for (kal_uintptr i = 0; i < kal::fs::preopen_count(); ++i) {
+            char nm[512]; kal_uintptr nl = 0; kal_dir p{};
+            if (kal_fs_preopen(i, &p, nm, sizeof nm, &nl) == kal_ok && nl == 1 && nm[0] == '/') {
+                slash = p; have_root = true;
+            }
+        }
+        auto open_now = [&]() -> int {
+            kal_dir fds{}; kal_uintptr it = 0; int n = 0;
+            if (kal_fs_open_dir(slash, "proc/self/fd", 12, &fds) != kal_ok) return -1;
+            if (kal_fs_list_begin(fds, &it) == kal_ok) {
+                for (;;) {
+                    char name[512]; kal_uintptr len = 0; int kind = 0;
+                    if (kal_fs_list_next(fds, &it, name, sizeof name, &len, &kind) != kal_ok || it == 0) break;
+                    ++n;
+                }
+            }
+            kal_fs_close_dir(fds);
+            return n;
+        };
+        if (have_root) {
+            const int before = open_now();
+            check(before >= 0, "the open descriptors are counted through proc/self/fd");
+            if (before >= 0) {
+                for (int i = 0; i < 64; ++i) {
+                    kal_dir again{}; kal_uintptr it = 0;
+                    if (kal_fs_open_dir(root, "okl_dir", 7, &again) != kal_ok) break;
+                    if (kal_fs_list_begin(again, &it) == kal_ok) {
+                        char name[512]; kal_uintptr len = 0; int kind = 0;
+                        kal_fs_list_next(again, &it, name, sizeof name, &len, &kind);
+                    }
+                    kal_fs_close_dir(again);
+                }
+                check(open_now() == before, "closing a directory ends an enumeration left part-way");
+            }
+        }
+    }
+
+    // A closed directory is a released handle, and the iterator it produced was
+    // released with it (fs.h, version 0.16): the next call is refused without
+    // the iterator being read through.
+    {
+        kal_dir once{}; kal_uintptr it = 0;
+        if (kal_fs_open_dir(root, "okl_dir", 7, &once) == kal_ok
+            && kal_fs_list_begin(once, &it) == kal_ok) {
+            kal_fs_close_dir(once);
+            char name[512]; kal_uintptr len = 0; int kind = 0;
+            check(kal_fs_list_next(once, &it, name, sizeof name, &len, &kind) == kal_err_invalid,
+                  "an enumeration of a closed directory is refused");
+        } else {
+            check(false, "a directory is enumerated so that its close can be observed");
+        }
+        kal_dir a{}, b{}; kal_uintptr ia = 0;
+        if (kal_fs_open_dir(root, "okl_dir", 7, &a) == kal_ok
+            && kal_fs_open_dir(root, "okl_dir", 7, &b) == kal_ok
+            && kal_fs_list_begin(a, &ia) == kal_ok) {
+            char name[512]; kal_uintptr len = 0; int kind = 0;
+            check(kal_fs_list_next(b, &ia, name, sizeof name, &len, &kind) == kal_err_invalid,
+                  "an iterator is refused with a directory that did not produce it");
+        }
+        kal_fs_close_dir(a); kal_fs_close_dir(b);
+    }
+
+    // A close that races a read of the same enumeration does not free what the
+    // reader is using (clause 6.6). Probabilistic by nature; what it shows is
+    // that two hundred such races end with the reader told something and the
+    // program still running.
+    {
+        struct race { kal_dir d; volatile int done; volatile int told; };
+        auto reader = [](void* p) {
+            auto* r = static_cast<race*>(p);
+            kal_uintptr it = 0;
+            if (kal_fs_list_begin(r->d, &it) == kal_ok) {
+                for (;;) {
+                    char name[512]; kal_uintptr len = 0; int kind = 0;
+                    const int e = kal_fs_list_next(r->d, &it, name, sizeof name, &len, &kind);
+                    if (e != kal_ok) { r->told = 1; break; }
+                    if (it == 0 && kal_fs_list_begin(r->d, &it) != kal_ok) { r->told = 1; break; }
+                }
+            } else {
+                r->told = 1;
+            }
+            __atomic_store_n(&r->done, 1, __ATOMIC_RELEASE);
+        };
+        int ended = 0;
+        for (int i = 0; i < 200; ++i) {
+            race r{};
+            if (kal_fs_open_dir(root, "okl_dir", 7, &r.d) != kal_ok) break;
+            kal_task t{};
+            if (kal_task_start(reader, &r, &t) != kal_ok) { kal_fs_close_dir(r.d); break; }
+            for (int spin = 0; spin < i * 10; ++spin) kal_task_yield();
+            kal_fs_close_dir(r.d);
+            kal_task_join(t);
+            ended += r.told;
+        }
+        check(ended == 200, "an enumeration racing the close of its directory ends and is told so");
+    }
 
     check(kal_fs_remove(root, "okl_dir/inner", 13) == kal_ok, "the inner file is removed");
     check(kal_fs_remove(root, "okl_dir", 7) == kal_ok, "the directory is removed");

@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.15.0"
+openkal = "0.16.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.16.1"
+openkal-linux = "0.17.0"
 ```
 
 ## Why it does not use a C library
@@ -44,6 +44,22 @@ second and third.
 
 All eight. `tools/check-surface.sh --complete` in the specification package
 compares the exported names against `SURFACE.txt`.
+
+## The stack a started context is given
+
+Where this implementation creates a context (the `standalone` arrangement) it
+maps the stack itself: 8 MiB unless more is asked for, which is the size the
+host's own C library gives a thread, and a 256 KiB inaccessible guard beneath
+it. The mapping is committed as it is touched, so the size costs address space
+rather than memory. The guard is larger than one page because a frame of 69,008
+bytes was measured in the C library above at `-O0`, and a frame larger than the
+guard steps over it.
+
+`kal_task_start_sized` (openkal 0.16) gives at least the size asked for and
+never less than the default, so a C library that asks for its own smaller
+default on every thread does not shrink what each one had. A request larger than
+the address space is `kal_err_no_memory`. Where the program carries a runtime of
+its own, the request is passed to that runtime.
 
 ## The region a context stands on
 

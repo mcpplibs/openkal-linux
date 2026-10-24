@@ -107,13 +107,49 @@ extern "C" okl_long __okl_clone(int (*fn)(void*), void* stack, int flags, void* 
 namespace {
 
 
-constexpr okl_uptr kStack = 256u * 1024u;
+// THE SIZE A CONTEXT IS GIVEN WHEN IT ASKS FOR NONE, AND IT IS THE HOST'S.
+//
+// It was 256 KiB, chosen when nothing above asked, and a C library above then
+// ran every thread on it whatever `pthread_attr_setstacksize' had been told
+// (mcpplibs/openkal-musl#48). A context that asks for nothing is the common
+// case --- C++'s `std::thread' has no way to ask --- so the default is the one a
+// program finds on the host's own C library, which sizes a thread by the limit
+// it gives the program's first stack: 8 MiB. The mapping is not committed until
+// it is touched, so a larger default costs address space and not memory.
+constexpr okl_uptr kDefaultStack = 8u * 1024u * 1024u;
+
+// THE GUARD BELOW EVERY STACK THIS IMPLEMENTATION MAPS, AND WHY IT IS LARGE.
+//
+// Without one, a context that ran off the end of its stack wrote into whatever
+// mapping lay beneath --- another context's stack, a block of the allocator ---
+// and nothing stopped it: the region was one anonymous mapping from kal_alloc,
+// and the C library above cannot place a guard of its own, because openkal has
+// no operation upon the protection of memory. A guard is only as good as the
+// largest frame that can step over it without touching it, and a frame of
+// 69,008 bytes was measured in the C library above in an unoptimised build, so
+// one page would be stepped over by the first such call. 256 KiB is address
+// space and not memory.
+constexpr okl_uptr kGuard = 256u * 1024u;
+
+constexpr okl_uptr kPageBytes = 4096u;
+
+okl_uptr round_up(okl_uptr n, okl_uptr to) { return (n + to - 1) & ~(to - 1); }
+
+// What a request for `want' bytes is given: at least that, and never less than
+// the default, which is what kal_task_start_sized states ("a least size").
+okl_uptr stack_for(okl_uptr want) {
+    if (want > ~okl_uptr{0} - kPageBytes - kGuard) return 0;
+    const okl_uptr w = round_up(want, kPageBytes);
+    return w > kDefaultStack ? w : kDefaultStack;
+}
 
 struct context {
     void (*entry)(void*);
     void*    arg;
-    void*    stack;
-    okl_uptr stack_bytes;
+    void*    stack;        // the lowest usable address, above the guard
+    okl_uptr stack_bytes;  // the usable size, which kal_task_stack reports
+    void*    map;          // the mapping, guard included
+    okl_uptr map_bytes;
     okl::tls_block tls;
     volatile int tid;      // the kernel clears this when the context ends
 #ifndef OKL_STANDALONE
@@ -407,23 +443,47 @@ int translate_posix(int e) {
 
 #endif
 
-}  // namespace
+#ifdef OKL_STANDALONE
+// Maps a stack of `bytes' usable bytes with the guard beneath it. The guard is
+// made inaccessible rather than left unmapped, so that nothing the kernel or
+// another allocation places later can occupy the addresses beneath the stack.
+bool map_stack(context* c, okl_uptr bytes) {
+    const okl_uptr total = bytes + kGuard;
+    const okl_long r = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(total),
+                                okl::prot_read | okl::prot_write,
+                                okl::map_private | okl::map_anonymous | okl::map_stack, -1, 0);
+    if (okl::failed(r)) return false;
+    if (okl::failed(okl::sys(okl::nr_mprotect, r, static_cast<okl_long>(kGuard), okl::prot_none))) {
+        okl::sys(okl::nr_munmap, r, static_cast<okl_long>(total));
+        return false;
+    }
+    c->map = reinterpret_cast<void*>(r);
+    c->map_bytes = total;
+    c->stack = reinterpret_cast<unsigned char*>(r) + kGuard;
+    c->stack_bytes = bytes;
+    return true;
+}
 
-extern "C" {
+void unmap_stack(context* c) {
+    if (c->map) okl::sys(okl::nr_munmap, reinterpret_cast<okl_long>(c->map),
+                         static_cast<okl_long>(c->map_bytes));
+}
+#endif
 
-int kal_task_start(void (*entry)(void*), void* arg, kal_task* out) {
+int start(void (*entry)(void*), void* arg, okl_uptr want, kal_task* out) {
     if (entry == nullptr || out == nullptr) return kal_err_invalid;
+    const okl_uptr bytes = stack_for(want);
+    if (bytes == 0) return kal_err_no_memory;
     auto* c = static_cast<context*>(kal_alloc(sizeof(context), alignof(context)));
     if (c == nullptr) return kal_err_no_memory;
     okl::fill(c, 0, sizeof(context));
     c->entry = entry; c->arg = arg;
 
 #ifdef OKL_STANDALONE
-    c->stack_bytes = kStack;
-    c->stack = kal_alloc(kStack, 16);
-    c->tls   = okl::make_tls(alloc_bridge);
-    if (c->stack == nullptr || c->tls.tp == nullptr) {
-        if (c->stack) kal_free(c->stack, kStack, 16);
+    const bool mapped = map_stack(c, bytes);
+    c->tls = okl::make_tls(alloc_bridge);
+    if (!mapped || c->tls.tp == nullptr) {
+        unmap_stack(c);
         if (c->tls.base) kal_free(c->tls.base, c->tls.bytes, c->tls.align);
         kal_free(c, sizeof(context), alignof(context));
         return kal_err_no_memory;
@@ -441,25 +501,53 @@ int kal_task_start(void (*entry)(void*), void* arg, kal_task* out) {
                         | 0x00080000   // CLONE_SETTLS
                         | 0x00100000   // CLONE_PARENT_SETTID
                         | 0x00200000;  // CLONE_CHILD_CLEARTID
-    auto* top = static_cast<unsigned char*>(c->stack) + kStack;
+    auto* top = static_cast<unsigned char*>(c->stack) + c->stack_bytes;
     const okl_long r = __okl_clone(run, top, flags, c,
                                    const_cast<int*>(&c->tid), c->tls.tp,
                                    const_cast<int*>(&c->tid));
     if (okl::failed(r)) {
-        kal_free(c->stack, kStack, 16);
+        unmap_stack(c);
         kal_free(c->tls.base, c->tls.bytes, c->tls.align);
         kal_free(c, sizeof(context), alignof(context));
         return okl::translate(r);
     }
 #else
+    // THE RUNTIME OWNS THE STACK HERE, so the size is asked of it. Its own
+    // accounting takes the guard and its thread-local image out of the size it
+    // is given, which is why the request is padded: what the context is told by
+    // kal_task_stack must be at least what was asked for, and the runtime's
+    // deductions are its own.
+    pthread_attr_t attr;
+    if (::pthread_attr_init(&attr) != 0) { kal_free(c, sizeof(context), alignof(context)); return kal_err_no_memory; }
+    const int sized = want == 0 ? 0 : ::pthread_attr_setstacksize(&attr, bytes + kGuard);
     pthread_t id{};
-    const int rc = ::pthread_create(&id, nullptr, run, c);
-    if (rc != 0) { kal_free(c, sizeof(context), alignof(context)); return translate_posix(rc); }
+    const int rc = sized != 0 ? sized : ::pthread_create(&id, want == 0 ? nullptr : &attr, run, c);
+    ::pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        kal_free(c, sizeof(context), alignof(context));
+        return rc == okl::e_inval && want != 0 ? kal_err_no_memory : translate_posix(rc);
+    }
     c->thread = static_cast<unsigned long>(id);
 #endif
 
     *out = kal_task{ reinterpret_cast<kal_uintptr>(c) };
     return kal_ok;
+}
+
+}  // namespace
+
+extern "C" {
+
+int kal_task_start(void (*entry)(void*), void* arg, kal_task* out) {
+    return start(entry, arg, 0, out);
+}
+
+// A least size, version 0.16. The size given is at least the one asked for and
+// never less than the default, so a C library that asks for its own default on
+// every thread does not shrink what each one had.
+int kal_task_start_sized(void (*entry)(void*), void* arg, kal_uintptr stack_size,
+                         kal_task* out) {
+    return start(entry, arg, stack_size, out);
 }
 
 int kal_task_join(kal_task h) {
@@ -475,7 +563,7 @@ int kal_task_join(kal_task h) {
         okl::sys(okl::nr_futex, reinterpret_cast<okl_long>(&c->tid),
                  okl::futex_wait, t, 0, 0, 0);
     }
-    kal_free(c->stack, c->stack_bytes, 16);
+    unmap_stack(c);
     kal_free(c->tls.base, c->tls.bytes, c->tls.align);
 #else
     const int rc = ::pthread_join(static_cast<pthread_t>(c->thread), nullptr);
