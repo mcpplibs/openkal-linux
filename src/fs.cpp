@@ -256,6 +256,8 @@ struct listing {
     int      fd;
     int      dir;      // the descriptor of the directory it was begun upon
     listing* next;
+    int      busy;     // a context is inside kal_fs_list_next with it
+    int      doomed;   // its directory was closed while it was busy
     okl_uptr used;
     okl_uptr pos;
     char     buf[8192];
@@ -279,22 +281,69 @@ void listings_lock() {
 }
 void listings_unlock() { __atomic_store_n(&g_listings_held, 0, __ATOMIC_RELEASE); }
 
-// Ends every listing begun upon `dir', or `one' alone where `dir' is negative.
-// What is ended is unlinked under the lock and released after it.
-void listings_end(int dir, listing* one) {
+void listing_release(listing* s) {
+    okl::sys(okl::nr_close, s->fd);
+    kal_free(s, sizeof(listing), alignof(listing));
+}
+
+// Ends every listing begun upon `dir'. What is ended is unlinked under the lock
+// and released after it.
+//
+// A LISTING ANOTHER CONTEXT IS READING IS NOT RELEASED HERE. Clause 6.6 requires
+// that concurrent operations upon one handle not damage this implementation's
+// state, and releasing the buffer a getdents64 in another context is writing
+// into would do exactly that. Such a listing is marked, and the context reading
+// it releases it on the way out; it can no longer be found, so nothing reaches
+// it after that.
+void listings_end(int dir) {
     listing* done = nullptr;
     listings_lock();
     for (listing** p = &g_listings; *p != nullptr;) {
         listing* s = *p;
-        if (dir >= 0 ? s->dir == dir : s == one) { *p = s->next; s->next = done; done = s; }
-        else p = &s->next;
+        if (s->dir != dir || s->doomed) { p = &s->next; continue; }
+        if (s->busy) { s->doomed = 1; p = &s->next; continue; }
+        *p = s->next; s->next = done; done = s;
     }
     listings_unlock();
-    while (done != nullptr) {
-        listing* s = done; done = s->next;
-        okl::sys(okl::nr_close, s->fd);
-        kal_free(s, sizeof(listing), alignof(listing));
+    while (done != nullptr) { listing* s = done; done = s->next; listing_release(s); }
+}
+
+// Takes `s' for the calling context, or reports that it is not a listing of
+// `dir' that is still open.
+//
+// THE WORD IS FOUND RATHER THAN BELIEVED. An iterator is the caller's copy of an
+// address this implementation allocated, and closing its directory frees what
+// it named --- so a caller that kept it, or that raced the close, holds an
+// address that may by now be anything. Searching the open listings for it is
+// what lets kal_fs_list_next refuse such a word without reading through it. The
+// search is over enumerations not yet read to their end, which a program holds
+// a handful of.
+bool listing_take(listing* s, int dir) {
+    for (;;) {
+        listings_lock();
+        listing* p = g_listings;
+        while (p != nullptr && p != s) p = p->next;
+        if (p == nullptr || p->dir != dir || p->doomed) { listings_unlock(); return false; }
+        if (!p->busy) { p->busy = 1; listings_unlock(); return true; }
+        // Two contexts reading one enumeration take turns; the order in which
+        // they receive its entries is the unspecified order clause 6.6 permits.
+        listings_unlock();
+        okl::sys(okl::nr_sched_yield);
     }
+}
+
+// Gives `s' back, and releases it if it reached its end or its directory was
+// closed while it was being read.
+void listing_give(listing* s, bool ended) {
+    listings_lock();
+    s->busy = 0;
+    const bool release = ended || s->doomed;
+    if (release) {
+        for (listing** p = &g_listings; *p != nullptr; p = &(*p)->next)
+            if (*p == s) { *p = s->next; break; }
+    }
+    listings_unlock();
+    if (release) listing_release(s);
 }
 
 }  // namespace
@@ -353,7 +402,7 @@ void kal_fs_close_dir(kal_dir d) {
     if (fd < 0) return;
     // Before the close, because after it the number may already name another
     // directory whose enumerations are not this one's.
-    listings_end(fd, nullptr);
+    listings_end(fd);
     okl::retire(d.h); okl::sys(okl::nr_close, fd);
 }
 
@@ -557,17 +606,23 @@ int kal_fs_list_begin(kal_dir d, kal_uintptr* iter) {
     if (okl::failed(own)) return okl::translate(own);
     auto* s = static_cast<listing*>(kal_alloc(sizeof(listing), alignof(listing)));
     if (s == nullptr) { okl::sys(okl::nr_close, own); return kal_err_no_memory; }
-    s->fd = static_cast<int>(own); s->dir = fd; s->used = 0; s->pos = 0;
+    s->fd = static_cast<int>(own); s->dir = fd; s->busy = 0; s->doomed = 0;
+    s->used = 0; s->pos = 0;
     listings_lock(); s->next = g_listings; g_listings = s; listings_unlock();
     *iter = reinterpret_cast<kal_uintptr>(s);
     return kal_ok;
 }
 
-int kal_fs_list_next(kal_dir, kal_uintptr* iter,
+int kal_fs_list_next(kal_dir d, kal_uintptr* iter,
                      char* name_out, kal_uintptr name_cap,
                      kal_uintptr* name_len, int* kind) {
-    if (iter == nullptr || *iter == 0) return kal_err_invalid;
+    // A CLOSED DIRECTORY IS A RELEASED HANDLE (clause 6.7), and closing it
+    // released the iterator too, which fs.h states. Both are refused here
+    // without the iterator being read through.
+    const int fd = okl::unpack(d.h);
+    if (fd < 0 || iter == nullptr || *iter == 0) return kal_err_invalid;
     auto* s = reinterpret_cast<listing*>(*iter);
+    if (!listing_take(s, fd)) return kal_err_invalid;
     for (;;) {
         if (s->pos >= s->used) {
             const okl_long r = okl::sys(okl::nr_getdents64, s->fd,
@@ -575,7 +630,7 @@ int kal_fs_list_next(kal_dir, kal_uintptr* iter,
                                         static_cast<okl_long>(sizeof s->buf));
             if (okl::interrupted(r)) continue;
             if (okl::failed(r) || r == 0) {
-                listings_end(-1, s);
+                listing_give(s, true);
                 *iter = 0;
                 if (name_len) *name_len = 0;
                 return okl::failed(r) ? okl::translate(r) : kal_ok;
@@ -593,6 +648,7 @@ int kal_fs_list_next(kal_dir, kal_uintptr* iter,
         if (kind) *kind = e->type == okl::dt_dir ? kal_node_directory
                         : e->type == okl::dt_reg ? kal_node_file
                         : e->type == okl::dt_lnk ? kal_node_link : kal_node_other;
+        listing_give(s, false);
         return kal_ok;
     }
 }
