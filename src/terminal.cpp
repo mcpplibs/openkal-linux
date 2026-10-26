@@ -37,6 +37,10 @@ kal_uintptr mode_of(const okl::ktermios& t) {
     if ((t.lflag & (okl::t_isig | okl::t_iexten)) == 0 &&
         (t.iflag & okl::t_ixon) == 0)   m |= KAL_TERM_PASS_CONTROL;
     if ((t.iflag & kAlters) == 0)       m |= KAL_TERM_PASS_INPUT;
+    // A terminal of this kernel is an emulator's or a console's, and both obey
+    // ECMA-48 whatever is asked (0.17): the position is reported set, and a
+    // request to clear it is ignored, as the declaration says.
+    m |= KAL_TERM_SEQUENCES;
     return m;
 }
 

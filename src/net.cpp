@@ -3,6 +3,8 @@
 #include "endpoint.h"
 #include <openkal/net.h>
 
+namespace okl { kal_uintptr volume_props_of(int fd); }   // fs.cpp
+
 // openkal.net upon the kernel's socket calls.
 //
 // A CONNECTION IS AN OWNED HANDLE AND THE STREAM IS BORROWED FROM IT, exactly as
@@ -125,6 +127,79 @@ int kal_net_accept(kal_net_listener l, kal_net_conn* out) {
         if (out->h == 0) { okl::sys(okl::nr_close, r); return kal_err_no_memory; }
         return kal_ok;
     }
+}
+
+// A RENDEZVOUS AT A NAME (0.17): a socket of the local family bound to a name
+// in the directory. The kernel binds to a path and not beneath a descriptor,
+// so the directory is named through the descriptor itself,
+// `/proc/self/fd/<dir>/<name>', which the kernel resolves through the
+// descriptor --- the directory the caller holds, wherever it has since been
+// moved. The address holds 108 bytes, and a name that does not fit beside
+// that prefix is one this environment cannot place (kal_err_invalid).
+static int local_address(kal_dir base, const char* name, kal_uintptr len,
+                         unsigned char (&addr)[110], okl_long& alen) {
+    const int dir = okl::unpack(base.h);
+    if (dir < 0 || !okl::acceptable(name, len) || len == 0) return kal_err_invalid;
+    for (kal_uintptr i = 0; i < len; ++i) if (name[i] == '/') return kal_err_invalid;
+    if ((okl::volume_props_of(dir) & KAL_FS_PROP_LOCAL_ENDPOINT) == 0) return kal_err_not_supported;
+    char path[108];
+    const char prefix[] = "/proc/self/fd/";
+    okl_uptr at = 0;
+    for (okl_uptr i = 0; i + 1 < sizeof prefix; ++i) path[at++] = prefix[i];
+    char d[12]; int n = 0;
+    for (unsigned v = static_cast<unsigned>(dir); ; v /= 10) { d[n++] = static_cast<char>('0' + v % 10); if (v < 10) break; }
+    while (n) path[at++] = d[--n];
+    path[at++] = '/';
+    if (at + len + 1 > sizeof path) return kal_err_invalid;
+    for (kal_uintptr i = 0; i < len; ++i) path[at++] = name[i];
+    path[at] = '\0';
+    addr[0] = 1; addr[1] = 0;                        // sa_family = AF_UNIX
+    for (okl_uptr i = 0; i <= at; ++i) addr[2 + i] = static_cast<unsigned char>(path[i]);
+    alen = static_cast<okl_long>(2 + at + 1);
+    return kal_ok;
+}
+
+int kal_net_listen_at(kal_dir base, const char* name, kal_uintptr len, kal_net_listener* out) {
+    if (out == nullptr) return kal_err_invalid;
+    unsigned char addr[110] = {};
+    okl_long alen = 0;
+    if (const int rc = local_address(base, name, len, addr, alen); rc != kal_ok) return rc;
+    const okl_long fd = okl::sys(okl::nr_socket, 1 /* AF_UNIX */, okl::sock_stream | okl::sock_cloexec, 0);
+    if (okl::failed(fd)) return okl::translate(fd);
+    if (const okl_long r = okl::sys(okl::nr_bind, fd, reinterpret_cast<okl_long>(addr), alen); okl::failed(r)) {
+        okl::sys(okl::nr_close, fd);
+        return r == -98 /* EADDRINUSE */ ? kal_err_exists : okl::translate(r);
+    }
+    if (const okl_long r = okl::sys(okl::nr_listen, fd, 128); okl::failed(r)) {
+        okl::sys(okl::nr_close, fd);
+        return okl::translate(r);
+    }
+    out->h = okl::pack(static_cast<int>(fd));
+    if (out->h == 0) { okl::sys(okl::nr_close, fd); return kal_err_no_memory; }
+    return kal_ok;
+}
+
+int kal_net_connect_at(kal_dir base, const char* name, kal_uintptr len, kal_net_conn* out) {
+    if (out == nullptr) return kal_err_invalid;
+    unsigned char addr[110] = {};
+    okl_long alen = 0;
+    if (const int rc = local_address(base, name, len, addr, alen); rc != kal_ok) return rc;
+    const okl_long fd = okl::sys(okl::nr_socket, 1 /* AF_UNIX */, okl::sock_stream | okl::sock_cloexec, 0);
+    if (okl::failed(fd)) return okl::translate(fd);
+    for (;;) {
+        const okl_long r = okl::sys(okl::nr_connect, fd, reinterpret_cast<okl_long>(addr), alen);
+        if (okl::interrupted(r)) continue;
+        if (okl::failed(r)) {
+            okl::sys(okl::nr_close, fd);
+            // Nothing listening: no name, or a name a listener left behind.
+            return (r == -okl::e_noent || r == -111 /* ECONNREFUSED */) ? kal_err_not_found
+                                                                        : okl::translate(r);
+        }
+        break;
+    }
+    out->h = okl::pack(static_cast<int>(fd));
+    if (out->h == 0) { okl::sys(okl::nr_close, fd); return kal_err_no_memory; }
+    return kal_ok;
 }
 
 kal_stream kal_net_stream(kal_net_conn c) {

@@ -3,7 +3,14 @@
 #include <openkal/process.h>
 #include <openkal/memory.h>
 
+namespace okl { extern char** g_envp; okl_ulong auxval(okl_ulong key); }
+
 namespace {
+
+bool same_prefix(const char* a, const char* b, okl_uptr n) {
+    for (okl_uptr i = 0; i < n; ++i) if (a[i] != b[i]) return false;
+    return true;
+}
 
 
 constexpr okl_uptr kMaxEntries = 512;
@@ -309,6 +316,115 @@ extern "C" {
 // grants, and two flags. They compose, which the three declarations could not
 // do: there was no way to grant directories AND bind a lifetime, and no way at
 // all to say the two things a shell runner needs together.
+// --- the handles of this interface (0.17) ------------------------------------
+//
+// A started program's handle is its identifier, as it always was. Two more
+// kinds exist since 0.17 and are told apart by the top byte, which no
+// identifier reaches: this program itself, and a program found by its
+// identifier, which carries the descriptor the kernel gave for it (`pidfd')
+// in the bits above the identifier.
+namespace {
+constexpr unsigned kind_child = 0, kind_self = 1, kind_opened = 2;
+inline unsigned handle_kind(kal_process h) { return static_cast<unsigned>(h.h >> 56); }
+inline okl_long handle_pid(kal_process h) { return static_cast<okl_long>(h.h & 0xffffffffu); }
+}  // namespace
+
+// --- where `execveat' cannot be used (0.18) ----------------------------------
+//
+// termux's PRoot implements `execveat' for AT_FDCWD only and answers ENOSYS to a
+// descriptor; in its ptrace mode it lets the kernel run the call untranslated,
+// and the started program dies at its first allocation. Every start in that
+// environment failed. The answer is `execve' with an absolute name, joined HERE,
+// before the duplication, from the name the kernel gives the base directory ---
+// the duplicate still allocates nothing. It costs the property `execveat'
+// bought, that the name is resolved through the descriptor, and is paid only
+// where `execveat' is unusable: from the first start under a translator this
+// implementation recognises, and after the first ENOSYS anywhere else.
+//
+// Ported from the copy mcppls carried (vendor/openkal-linux 0.15.1), which set
+// the flag itself under PRoot; recognising the translator here removes that.
+namespace {
+
+int g_by_name = -1;   // -1 not yet decided, 0 execveat, 1 execve
+
+// Whether this program is traced by PRoot: the tracer's name, and where /proc
+// hides it, a PROOT_ variable. A debugger also traces and is not a translator.
+bool under_translator() {
+    char st[4096];
+    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd,
+                                 reinterpret_cast<okl_long>("/proc/self/status"),
+                                 okl::o_rdonly | okl::o_cloexec, 0);
+    okl_long n = 0;
+    if (!okl::failed(fd)) {
+        n = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(st), sizeof st - 1);
+        okl::sys(okl::nr_close, fd);
+    }
+    if (n > 0) {
+        st[n] = '\0';
+        const char* t = nullptr;
+        for (okl_long i = 0; i + 10 < n; ++i)
+            if (st[i] == 'T' && same_prefix(st + i, "TracerPid:", 10)) { t = st + i + 10; break; }
+        okl_long pid = 0;
+        while (t && (*t == ' ' || *t == '\t')) ++t;
+        while (t && *t >= '0' && *t <= '9') pid = pid * 10 + (*t++ - '0');
+        if (pid == 0) return false;
+        char path[48] = "/proc/";
+        char* o = put_decimal(path + 6, static_cast<okl_uptr>(pid));
+        okl::copy(o, "/comm", 6);
+        const okl_long cfd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+                                      okl::o_rdonly | okl::o_cloexec, 0);
+        if (!okl::failed(cfd)) {
+            char comm[32] = {};
+            const okl_long m = okl::sys(okl::nr_read, cfd, reinterpret_cast<okl_long>(comm), sizeof comm - 1);
+            okl::sys(okl::nr_close, cfd);
+            return m >= 5 && same_prefix(comm, "proot", 5);
+        }
+    }
+    for (char** e = okl::g_envp; e && *e; ++e)
+        if (same_prefix(*e, "PROOT_", 6)) return true;
+    return false;
+}
+
+bool by_name() {
+    int v = __atomic_load_n(&g_by_name, __ATOMIC_ACQUIRE);
+    if (v < 0) {
+        v = under_translator() ? 1 : 0;
+        __atomic_store_n(&g_by_name, v, __ATOMIC_RELEASE);
+    }
+    return v == 1;
+}
+
+// `/proc/self/fd/<fd>' read, and `name' joined beneath it.
+bool absolute_under(int fd, const char* name, okl_uptr len, char* out, okl_uptr cap) {
+    char link[32] = "/proc/self/fd/";
+    char* e = put_decimal(link + 14, static_cast<okl_uptr>(fd));
+    *e = '\0';
+    const okl_long r = okl::sys(okl::nr_readlinkat, okl::at_fdcwd, reinterpret_cast<okl_long>(link),
+                                reinterpret_cast<okl_long>(out), static_cast<okl_long>(cap));
+    if (okl::failed(r) || r <= 0) return false;
+    okl_uptr at = static_cast<okl_uptr>(r);
+    if (at + 1 + len + 1 > cap) return false;
+    if (out[at - 1] != '/') out[at++] = '/';
+    okl::copy(out + at, name, len);
+    out[at + len] = '\0';
+    return true;
+}
+
+}  // namespace
+
+// EVERY ENVIRONMENT ENTRY IS `NAME=value' (0.17, process.h). Refused before
+// anything is built, so that one implementation does not pass on an entry
+// another refuses.
+static bool entries_well_formed(const char** envp, const kal_uintptr* lens, kal_uintptr n) {
+    for (kal_uintptr i = 0; i < n; ++i) {
+        if (envp[i] == nullptr) return false;
+        kal_uintptr eq = 0;
+        while (eq < lens[i] && envp[i][eq] != '=') ++eq;
+        if (eq == 0 || eq == lens[i]) return false;
+    }
+    return true;
+}
+
 int kal_process_spawn(const kal_spawn* how,
                       const char* path, kal_uintptr path_len,
                       const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
@@ -347,6 +463,15 @@ int kal_process_spawn(const kal_spawn* how,
             if (g.name[c] == '\0') return kal_err_invalid;
         granted[i] = fd;
     }
+
+    if (envc > 0 && (envp == nullptr || envp_lens == nullptr)) return kal_err_invalid;
+    if (!entries_well_formed(envp, envp_lens, envc)) return kal_err_invalid;
+
+    // The absolute name, for `execve' where `execveat' cannot be used. Computed
+    // always, because the first start that meets ENOSYS learns it in the child.
+    char resolved[2 * okl::max_name + 2];
+    const bool named = absolute_under(b, p.buf, path_len, resolved, sizeof resolved);
+    const bool use_name = by_name() && named;
 
     vector args, envs;
     if (!args.build(argv, argv_lens, argc)) return kal_err_no_memory;
@@ -517,6 +642,14 @@ int kal_process_spawn(const kal_spawn* how,
         //
         // A name that cannot be opened is reported exactly as one that cannot be
         // started is, through the same pipe.
+        if (use_name) {
+            const okl_long why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
+                                          reinterpret_cast<okl_long>(args.slots),
+                                          reinterpret_cast<okl_long>(envs.slots));
+            report.say(why);
+            okl::sys(okl::nr_exit_group, 127);
+            for (;;) { }
+        }
         okl_long exe = okl::sys(okl::nr_openat, base, reinterpret_cast<okl_long>(p.buf),
                                 okl::o_path | okl::o_cloexec, 0);
         if (okl::failed(exe)) {
@@ -536,6 +669,10 @@ int kal_process_spawn(const kal_spawn* how,
             okl::sys(okl::nr_fcntl, exe, okl::f_setfd, 0);
             why = start();
         }
+        if (why == -okl::e_nosys && named)
+            why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
+                           reinterpret_cast<okl_long>(args.slots),
+                           reinterpret_cast<okl_long>(envs.slots));
         // Reached only when the replacement did not happen, because when it does
         // there is nothing here to reach.
         report.say(why);
@@ -604,6 +741,8 @@ void kal_process_channel_close(kal_stream s) {
 
 int kal_process_wait(kal_process h, int* status, int* terminated_by_environment) {
     if (h.h == 0) return kal_err_invalid;
+    if (handle_kind(h) == kind_self) return kal_err_invalid;
+    if (handle_kind(h) == kind_opened) return kal_err_not_supported;
     int st = 0;
     for (;;) {
         const okl_long r = okl::sys(okl::nr_wait4, static_cast<okl_long>(h.h),
@@ -635,6 +774,8 @@ int kal_process_wait(kal_process h, int* status, int* terminated_by_environment)
 // the caller says which of the two it means.
 int kal_process_terminate(kal_process h) {
     if (h.h == 0) return kal_err_invalid;
+    if (handle_kind(h) == kind_self) return kal_err_invalid;
+    if (handle_kind(h) == kind_opened) return kal_err_not_supported;
     const okl_long r = okl::sys(okl::nr_kill, static_cast<okl_long>(h.h), 15 /* SIGTERM */);
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
@@ -697,7 +838,12 @@ void kal_process_job_close(kal_job) { }
 
 // Releasing the handle does not affect the program. A program that has not been
 // waited for continues, and this environment collects it when the caller exits.
-void kal_process_close(kal_process) { }
+void kal_process_close(kal_process h) {
+    if (handle_kind(h) == kind_opened) {
+        const okl_long fd = static_cast<okl_long>((h.h >> 32) & 0xffffu) - 1;
+        if (fd >= 0) okl::sys(okl::nr_close, fd);
+    }
+}
 
 // A WORD THE ENVIRONMENT SETS WHEN SOMEBODY HAS ASKED THIS PROGRAM TO END.
 //
@@ -726,14 +872,27 @@ int     g_stop_armed = 0;
 
 #if defined(__x86_64__)
 extern "C" void okl_sigreturn_trampoline(void);
-asm(".globl okl_sigreturn_trampoline\n"
+// IN `.text', SAID IN SO MANY WORDS (0.18). A top-level `asm' is emitted into
+// whatever section the compiler is in at that point of the file, and GCC at
+// -O0 was in `.bss': the three instructions were zero bytes in memory that may
+// not be executed, and the first request to end a program faulted on its way
+// back from the handler (measured: SIGSEGV after SIGTERM, GCC -O0 only).
+asm(".pushsection .text,\"ax\",@progbits\n"
+    ".globl okl_sigreturn_trampoline\n"
     "okl_sigreturn_trampoline:\n"
     "  movq $15, %rax\n"      // rt_sigreturn
-    "  syscall\n");
+    "  syscall\n"
+    ".popsection\n");
 constexpr unsigned long sa_restorer_flag = 0x04000000u;   // SA_RESTORER
 #endif
 
-void stop_handler(int) {
+// Which request arrived first, for `kal_process_end_as_requested'.
+int g_stop_signal = 0;
+
+void stop_handler(int signo) {
+    int none = 0;
+    __atomic_compare_exchange_n(&g_stop_signal, &none, signo, false,
+                                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
     __atomic_store_n(&g_stop_word, 1u, __ATOMIC_RELEASE);
     okl::sys(okl::nr_futex, reinterpret_cast<okl_long>(&g_stop_word),
              1 /* FUTEX_WAKE */, 0x7fffffff, 0, 0, 0);
@@ -748,6 +907,16 @@ void stop_handler(int) {
 // mode obvious.
 bool arm_one(int signo) {
     struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act {};
+    // A REQUEST THE STARTER ARRANGED NOT TO DELIVER STAYS UNDELIVERED (0.17,
+    // the take-over rule). A program started in the background is started with
+    // these requests ignored, and taking them over would end it when its
+    // starter meant it to survive them --- which this did until 0.18.
+    {
+        decltype(act) old{};
+        const okl_long r = okl::sys(okl::nr_rt_sigaction, signo, 0,
+                                    reinterpret_cast<okl_long>(&old), sizeof old.mask);
+        if (!okl::failed(r) && old.handler == reinterpret_cast<void*>(1) /* SIG_IGN */) return true;
+    }
     act.handler = reinterpret_cast<void*>(&stop_handler);
 #if defined(__x86_64__)
     act.flags   = sa_restorer_flag;
@@ -775,12 +944,183 @@ const kal_u32* kal_process_stop_requested(void) {
     return state == 1 ? &g_stop_word : nullptr;
 }
 
+// --- what is known of a program (0.17) --------------------------------------
+namespace {
+
+// `pidfd_open' is the kernel's handle on a program, and it is what lets a
+// handle found by an identifier keep naming that program after the number is
+// given again (5.3 and later). Asked once.
+int g_pidfd = -1;
+bool open_id_available() {
+    int v = __atomic_load_n(&g_pidfd, __ATOMIC_ACQUIRE);
+    if (v < 0) {
+        const okl_long fd = okl::sys(okl::nr_pidfd_open, okl::sys(okl::nr_getpid), 0);
+        v = okl::failed(fd) ? 0 : 1;
+        if (!okl::failed(fd)) okl::sys(okl::nr_close, fd);
+        __atomic_store_n(&g_pidfd, v, __ATOMIC_RELEASE);
+    }
+    return v == 1;
+}
+
+// /proc/<pid>/stat: the fields after the name, which is in parentheses and may
+// itself contain them, so the last `)' is where the fields begin. Field 22 is
+// when the program started, in the kernel's clock ticks since boot.
+bool started_ticks(okl_long pid, okl_u64& ticks) {
+    char path[40] = "/proc/";
+    char* o = put_decimal(path + 6, static_cast<okl_uptr>(pid));
+    okl::copy(o, "/stat", 6);
+    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+                                 okl::o_rdonly | okl::o_cloexec, 0);
+    if (okl::failed(fd)) return false;
+    char b[1024];
+    const okl_long n = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(b), sizeof b - 1);
+    okl::sys(okl::nr_close, fd);
+    if (n <= 0) return false;
+    okl_long close = -1;
+    for (okl_long i = 0; i < n; ++i) if (b[i] == ')') close = i;
+    if (close < 0) return false;
+    int field = 2;                                   // the name was field 2
+    okl_long i = close + 1;
+    while (i < n && field < 22) { if (b[i] == ' ') ++field; ++i; }
+    if (field != 22) return false;
+    okl_u64 v = 0;
+    while (i < n && b[i] >= '0' && b[i] <= '9') v = v * 10 + static_cast<okl_u64>(b[i++] - '0');
+    ticks = v;
+    return true;
+}
+
+okl_u64 ticks_to_ns(okl_u64 t) {
+    okl_ulong hz = okl::auxval(17 /* AT_CLKTCK */);
+    if (hz == 0) hz = 100;
+    return t / hz * 1000000000ull + t % hz * (1000000000ull / hz);
+}
+
+// The processor time of a program, through the clock the kernel keeps for
+// every program (`MAKE_PROCESS_CPUCLOCK(pid, CPUCLOCK_SCHED)'): nanoseconds,
+// for any program the caller may ask about.
+bool cpu_ns(okl_long pid, bool self, okl_u64& out) {
+    const okl_long clock = self ? 2 /* CLOCK_PROCESS_CPUTIME_ID */
+                                : static_cast<okl_long>(static_cast<int>((~static_cast<unsigned>(pid)) << 3) | 2);
+    struct { okl_long sec, nsec; } ts{};
+    const okl_long r = okl::sys(okl::nr_clock_gettime, clock, reinterpret_cast<okl_long>(&ts));
+    if (okl::failed(r)) return false;
+    out = static_cast<okl_u64>(ts.sec) * 1000000000ull + static_cast<okl_u64>(ts.nsec);
+    return true;
+}
+
+// Whether a program has ended. A started one: `waitid' without collecting it
+// (WNOWAIT), and one already collected has ended too. One found by its
+// identifier: its descriptor is readable once it has ended.
+bool has_ended(kal_process h) {
+    if (handle_kind(h) == kind_self) return false;
+    if (handle_kind(h) == kind_opened) {
+        const okl_long fd = static_cast<okl_long>((h.h >> 32) & 0xffffu) - 1;
+        if (fd < 0) return false;
+        struct { int fd; short events, revents; } pfd{ static_cast<int>(fd), 1 /* POLLIN */, 0 };
+        struct { okl_long sec, nsec; } zero{0, 0};
+        const okl_long r = okl::sys(okl::nr_ppoll, reinterpret_cast<okl_long>(&pfd), 1,
+                                    reinterpret_cast<okl_long>(&zero), 0, 0);
+        return r > 0 && (pfd.revents & 1) != 0;
+    }
+    alignas(8) unsigned char info[128] = {};
+    const okl_long r = okl::sys(okl::nr_waitid, 1 /* P_PID */, handle_pid(h),
+                                reinterpret_cast<okl_long>(info),
+                                4 | 1 | 0x01000000 /* WEXITED | WNOHANG | WNOWAIT */, 0);
+    if (r == -okl::e_child) return true;
+    if (okl::failed(r)) return false;
+    int si_pid = 0;
+    okl::copy(reinterpret_cast<char*>(&si_pid), reinterpret_cast<const char*>(info + 16), sizeof si_pid);
+    return si_pid != 0;
+}
+
+}  // namespace
+
+int kal_process_self(kal_process* out) {
+    if (out == nullptr) return kal_err_invalid;
+    *out = kal_process{ (static_cast<kal_uintptr>(kind_self) << 56)
+                        | static_cast<kal_uintptr>(okl::sys(okl::nr_getpid)) };
+    return kal_ok;
+}
+
+int kal_process_open_id(kal_u64 id, kal_process* out) {
+    if (out == nullptr || id == 0 || id > 0x7fffffffu) return id == 0 || out == nullptr
+                                                             ? kal_err_invalid : kal_err_not_found;
+    if (!open_id_available()) return kal_err_not_supported;
+    const okl_long fd = okl::sys(okl::nr_pidfd_open, static_cast<okl_long>(id), 0);
+    if (fd == -3 /* ESRCH */) return kal_err_not_found;
+    if (okl::failed(fd)) return okl::translate(fd);
+    if (fd >= 0xffff) { okl::sys(okl::nr_close, fd); return kal_err_no_memory; }
+    okl::sys(okl::nr_fcntl, fd, okl::f_setfd, okl::fd_cloexec);
+    *out = kal_process{ (static_cast<kal_uintptr>(kind_opened) << 56)
+                        | (static_cast<kal_uintptr>(fd + 1) << 32)
+                        | static_cast<kal_uintptr>(id) };
+    return kal_ok;
+}
+
+int kal_process_info(kal_process p, kal_u32 wanted, kal_program_info* out) {
+    if (out == nullptr || p.h == 0 || out->self_size < 8) return kal_err_invalid;
+    const kal_u32 self = out->self_size;
+    kal_program_info v{};
+    v.self_size = self;
+    const okl_long pid = handle_pid(p);
+    const bool me = handle_kind(p) == kind_self;
+    v.id = static_cast<kal_u64>(pid);
+    v.present |= KAL_PINFO_ID;
+    const bool ended = has_ended(p);
+    v.ended = ended ? 1u : 0u;
+    v.present |= KAL_PINFO_ENDED;
+    if (!ended && (wanted & KAL_PINFO_STARTED)) {
+        okl_u64 t = 0;
+        // Read, then checked again: a program found by its identifier that
+        // ended meanwhile may have had its number given to another, whose start
+        // this would have read.
+        if (started_ticks(pid, t) && !has_ended(p)) {
+            v.started_ns = ticks_to_ns(t);
+            v.present |= KAL_PINFO_STARTED;
+        }
+    }
+    if (!ended && (wanted & KAL_PINFO_CPU)) {
+        okl_u64 c = 0;
+        if (cpu_ns(pid, me, c)) { v.cpu_ns = c; v.present |= KAL_PINFO_CPU; }
+    }
+    const kal_u32 n = self < sizeof v ? self : static_cast<kal_u32>(sizeof v);
+    okl::copy(reinterpret_cast<char*>(out), reinterpret_cast<const char*>(&v), n);
+    return kal_ok;
+}
+
+// ENDS AS THE REQUEST WOULD HAVE ENDED THE PROGRAM (0.17): the request's own
+// default treatment restored, the request unblocked and sent again. Its
+// default is to end the program, so the starter's wait reports the signal; a
+// program that is somehow still here a moment later ends with the status a
+// shell gives such a program.
+int kal_process_end_as_requested(void) {
+    if (__atomic_load_n(&g_stop_word, __ATOMIC_ACQUIRE) == 0) return kal_err_invalid;
+    int signo = __atomic_load_n(&g_stop_signal, __ATOMIC_RELAXED);
+    if (signo == 0) signo = 15;
+    struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act {};
+#if defined(__x86_64__)
+    act.flags    = sa_restorer_flag;
+    act.restorer = reinterpret_cast<void*>(&okl_sigreturn_trampoline);
+#endif
+    okl::sys(okl::nr_rt_sigaction, signo, reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
+    unsigned long set = 1ul << (signo - 1);
+    okl::sys(okl::nr_rt_sigprocmask, 1 /* SIG_UNBLOCK */, reinterpret_cast<okl_long>(&set), 0, sizeof set);
+    okl::sys(okl::nr_kill, okl::sys(okl::nr_getpid), signo);
+    for (int i = 0; i < 100; ++i) {
+        struct { okl_long sec, nsec; } ts{0, 1000000};
+        okl::sys(okl::nr_nanosleep, reinterpret_cast<okl_long>(&ts), 0);
+    }
+    okl::sys(okl::nr_exit_group, 128 + signo);
+    for (;;) { }
+}
+
 kal_uintptr kal_process_props(void) {
     return KAL_PROCESS_PROP_TERMINATE | KAL_PROCESS_PROP_STREAM_PASSING
          | KAL_PROCESS_PROP_EXIT_STATUS
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
          | KAL_PROCESS_PROP_JOB
+         | (open_id_available() ? KAL_PROCESS_PROP_OPEN_ID : 0u)
          // AGREES WITH `kal_process_stop_requested', because the header
          // defines null there as the absence this position reports. Read and
          // never armed: asking what an implementation can do must not install a

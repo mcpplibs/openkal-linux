@@ -202,4 +202,28 @@ kal_intptr kal_env_var_at(kal_uintptr index, char* out, kal_uintptr cap) {
     return -kal_err_not_found;
 }
 
+// THE IMAGE THE KERNEL STARTED (0.17). `/proc/self/exe' names the file the
+// kernel mapped, resolved; where the pseudo-file system is not mounted, the
+// name the kernel was given (AT_EXECFN), which is the starter's spelling and
+// may be relative to where the starter was --- the environment's answer
+// either way, which is what the declaration asks for.
+kal_intptr kal_env_image(char* out, kal_uintptr cap) {
+    char buf[4096];
+    const okl_long n = okl::sys(okl::nr_readlinkat, okl::at_fdcwd,
+                                reinterpret_cast<okl_long>("/proc/self/exe"),
+                                reinterpret_cast<okl_long>(buf), sizeof buf);
+    if (!okl::failed(n) && n > 0 && n < static_cast<okl_long>(sizeof buf))
+        return give(buf, static_cast<kal_uintptr>(n), out, cap);
+    if (const okl_ulong fn = okl::auxval(31 /* AT_EXECFN */); fn != 0) {
+        const char* name = reinterpret_cast<const char*>(fn);
+        return give(name, okl::length(name), out, cap);
+    }
+    return -kal_err_not_found;
+}
+
+// For conventions only, as the declaration restricts it.
+kal_intptr kal_env_system(char* out, kal_uintptr cap) {
+    return give("linux", 5, out, cap);
+}
+
 }

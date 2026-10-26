@@ -43,6 +43,14 @@ namespace okl {
 
 #if defined(__x86_64__)
 
+// EVERY ARGUMENT REGISTER IS AN IN/OUT OPERAND (0.18). The kernel preserves
+// them, and the operands used to say so; a system-call translator does not.
+// termux's PRoot, in its default seccomp mode, rewrites the register that
+// carries the path of `openat' and leaves it rewritten, so a value the compiler
+// kept "in rsi" across the call was the translator's and not the program's
+// --- measured: the `"/"' preopen lost its name and every program path was
+// "outside every preopened directory". Declaring the registers written costs
+// nothing the kernel's own convention did not already allow.
 inline okl_long sys(okl_long n) {
     okl_ulong r;
     __asm__ __volatile__("syscall" : "=a"(r) : "a"(n) : "rcx", "r11", "memory");
@@ -50,38 +58,38 @@ inline okl_long sys(okl_long n) {
 }
 inline okl_long sys(okl_long n, okl_long a) {
     okl_ulong r;
-    __asm__ __volatile__("syscall" : "=a"(r) : "a"(n), "D"(a) : "rcx", "r11", "memory");
+    __asm__ __volatile__("syscall" : "=a"(r), "+D"(a) : "a"(n) : "rcx", "r11", "memory");
     return static_cast<okl_long>(r);
 }
 inline okl_long sys(okl_long n, okl_long a, okl_long b) {
     okl_ulong r;
-    __asm__ __volatile__("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b) : "rcx", "r11", "memory");
+    __asm__ __volatile__("syscall" : "=a"(r), "+D"(a), "+S"(b) : "a"(n) : "rcx", "r11", "memory");
     return static_cast<okl_long>(r);
 }
 inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c) {
     okl_ulong r;
-    __asm__ __volatile__("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c)
+    __asm__ __volatile__("syscall" : "=a"(r), "+D"(a), "+S"(b), "+d"(c) : "a"(n)
                          : "rcx", "r11", "memory");
     return static_cast<okl_long>(r);
 }
 inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d) {
     okl_ulong r; register okl_long r10 __asm__("r10") = d;
-    __asm__ __volatile__("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
+    __asm__ __volatile__("syscall" : "=a"(r), "+D"(a), "+S"(b), "+d"(c), "+r"(r10) : "a"(n)
                          : "rcx", "r11", "memory");
     return static_cast<okl_long>(r);
 }
 inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d, okl_long e) {
     okl_ulong r; register okl_long r10 __asm__("r10") = d; register okl_long r8 __asm__("r8") = e;
-    __asm__ __volatile__("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8)
-                         : "rcx", "r11", "memory");
+    __asm__ __volatile__("syscall" : "=a"(r), "+D"(a), "+S"(b), "+d"(c), "+r"(r10), "+r"(r8)
+                         : "a"(n) : "rcx", "r11", "memory");
     return static_cast<okl_long>(r);
 }
 inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d, okl_long e, okl_long f) {
     okl_ulong r; register okl_long r10 __asm__("r10") = d; register okl_long r8 __asm__("r8") = e;
     register okl_long r9 __asm__("r9") = f;
-    __asm__ __volatile__("syscall" : "=a"(r)
-                         : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
-                         : "rcx", "r11", "memory");
+    __asm__ __volatile__("syscall"
+                         : "=a"(r), "+D"(a), "+S"(b), "+d"(c), "+r"(r10), "+r"(r8), "+r"(r9)
+                         : "a"(n) : "rcx", "r11", "memory");
     return static_cast<okl_long>(r);
 }
 
@@ -117,6 +125,10 @@ enum : okl_long {
     // and poll takes milliseconds, so poll could not express a bound finer than
     // the granularity this implementation reports.
     nr_ppoll = 271,
+    // openkal 0.17: a rename that does not replace, a program found by its
+    // number, how one ended, and the request reproduced.
+    nr_renameat2 = 316, nr_pidfd_open = 434, nr_waitid = 247,
+    nr_rt_sigprocmask = 14,
 };
 
 #elif defined(__aarch64__)
@@ -141,20 +153,20 @@ inline okl_long sys(okl_long n, okl_long a) {
 inline okl_long sys(okl_long n, okl_long a, okl_long b) {
     register okl_long x8 __asm__("x8") = n; register okl_long x0 __asm__("x0") = a;
     register okl_long x1 __asm__("x1") = b;
-    __asm__ __volatile__("svc 0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory", "cc");
+    __asm__ __volatile__("svc 0" : "+r"(x0), "+r"(x1) : "r"(x8) : "memory", "cc");
     return x0;
 }
 inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c) {
     register okl_long x8 __asm__("x8") = n; register okl_long x0 __asm__("x0") = a;
     register okl_long x1 __asm__("x1") = b; register okl_long x2 __asm__("x2") = c;
-    __asm__ __volatile__("svc 0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory", "cc");
+    __asm__ __volatile__("svc 0" : "+r"(x0), "+r"(x1), "+r"(x2) : "r"(x8) : "memory", "cc");
     return x0;
 }
 inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d) {
     register okl_long x8 __asm__("x8") = n; register okl_long x0 __asm__("x0") = a;
     register okl_long x1 __asm__("x1") = b; register okl_long x2 __asm__("x2") = c;
     register okl_long x3 __asm__("x3") = d;
-    __asm__ __volatile__("svc 0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3)
+    __asm__ __volatile__("svc 0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : "r"(x8)
                          : "memory", "cc");
     return x0;
 }
@@ -162,8 +174,8 @@ inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d, 
     register okl_long x8 __asm__("x8") = n; register okl_long x0 __asm__("x0") = a;
     register okl_long x1 __asm__("x1") = b; register okl_long x2 __asm__("x2") = c;
     register okl_long x3 __asm__("x3") = d; register okl_long x4 __asm__("x4") = e;
-    __asm__ __volatile__("svc 0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4)
-                         : "memory", "cc");
+    __asm__ __volatile__("svc 0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4)
+                         : "r"(x8) : "memory", "cc");
     return x0;
 }
 inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d,
@@ -172,9 +184,8 @@ inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d,
     register okl_long x1 __asm__("x1") = b; register okl_long x2 __asm__("x2") = c;
     register okl_long x3 __asm__("x3") = d; register okl_long x4 __asm__("x4") = e;
     register okl_long x5 __asm__("x5") = f;
-    __asm__ __volatile__("svc 0" : "+r"(x0)
-                         : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
-                         : "memory", "cc");
+    __asm__ __volatile__("svc 0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5)
+                         : "r"(x8) : "memory", "cc");
     return x0;
 }
 
@@ -211,6 +222,9 @@ enum : okl_long {
     // openkal.timeout. This architecture has no `poll' at all, only `ppoll',
     // which is a second reason the bound is expressed through the latter.
     nr_ppoll = 73,
+    // openkal 0.17, as on the other architecture.
+    nr_renameat2 = 276, nr_pidfd_open = 434, nr_waitid = 95,
+    nr_rt_sigprocmask = 135,
 };
 
 #else

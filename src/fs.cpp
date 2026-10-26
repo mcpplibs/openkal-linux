@@ -143,12 +143,23 @@ kal_uintptr volume_props(int fd) {
 
     switch (sf.f_type) {
         // Formats with a case-sensitive namespace and nodes that name others.
+        //
+        // A rename that does not replace (0.17) is `renameat2' with
+        // RENAME_NOREPLACE, which each of these formats implements except the
+        // one whose support arrived late and is not known from its type; a
+        // socket bound to a name (0.17, KAL_FS_PROP_LOCAL_ENDPOINT) is a node
+        // every one of them stores.
         case okl::fs_ext234: case okl::fs_btrfs: case okl::fs_xfs:
         case okl::fs_f2fs:   case okl::fs_tmpfs: case okl::fs_overlay:
-        case okl::fs_zfs:    case okl::fs_bcachefs:
+        case okl::fs_bcachefs:
             return conservative | KAL_FS_PROP_CASE_SENSITIVE
                  | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
-                 | KAL_FS_PROP_EXECUTABLE;
+                 | KAL_FS_PROP_EXECUTABLE
+                 | KAL_FS_PROP_RENAME_NO_REPLACE | KAL_FS_PROP_LOCAL_ENDPOINT;
+        case okl::fs_zfs:
+            return conservative | KAL_FS_PROP_CASE_SENSITIVE
+                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
+                 | KAL_FS_PROP_EXECUTABLE | KAL_FS_PROP_LOCAL_ENDPOINT;
 
         // Read-only formats: the nodes are there and none can be made, and a
         // rename cannot be atomic because there is no rename.
@@ -178,6 +189,16 @@ kal_uintptr volume_props(int fd) {
             return conservative;
     }
 }
+
+}  // namespace (reopened below)
+
+namespace okl {
+// The volume's properties, for the interfaces outside this file that ask one
+// (openkal.net's rendezvous at a name).
+kal_uintptr volume_props_of(int fd) { return volume_props(fd); }
+}  // namespace okl
+
+namespace {
 
 // Writes no more of the structure than the caller says exists on its side, and
 // reports which fields it filled.
@@ -591,6 +612,27 @@ int kal_fs_rename(kal_dir from, const char* a, kal_uintptr alen,
     if (!ta.ok || !tb.ok) return kal_err_invalid;
     const okl_long r = okl::sys(okl::nr_renameat, f, reinterpret_cast<okl_long>(ta.buf),
                                 t2, reinterpret_cast<okl_long>(tb.buf));
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
+// A RENAME THAT DOES NOT REPLACE (0.17) is the kernel's own: `renameat2' with
+// RENAME_NOREPLACE tests and renames in one act. A format that does not
+// implement the flag answers EINVAL, and a kernel before 3.15 ENOSYS; both are
+// a volume that cannot, which `kal_fs_props' answers before the call for the
+// formats this file knows.
+int kal_fs_rename_flags(kal_dir from, const char* a, kal_uintptr alen,
+                        kal_dir to,   const char* b, kal_uintptr blen,
+                        kal_uintptr flags) {
+    if ((flags & ~static_cast<kal_uintptr>(KAL_RENAME_NO_REPLACE)) != 0) return kal_err_invalid;
+    if (flags == 0) return kal_fs_rename(from, a, alen, to, b, blen);
+    const int f = okl::unpack(from.h), t2 = okl::unpack(to.h);
+    if (f < 0 || t2 < 0 || !okl::acceptable(a, alen) || !okl::acceptable(b, blen)) return kal_err_invalid;
+    if ((volume_props(t2) & KAL_FS_PROP_RENAME_NO_REPLACE) == 0) return kal_err_not_supported;
+    okl::terminated ta(a, alen), tb(b, blen);
+    if (!ta.ok || !tb.ok) return kal_err_invalid;
+    const okl_long r = okl::sys(okl::nr_renameat2, f, reinterpret_cast<okl_long>(ta.buf),
+                                t2, reinterpret_cast<okl_long>(tb.buf), 1 /* RENAME_NOREPLACE */);
+    if (r == -okl::e_inval || r == -okl::e_nosys) return kal_err_not_supported;
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
