@@ -15,6 +15,9 @@ namespace okl {
 int    g_argc = 0;
 char** g_argv = nullptr;
 char** g_envp = nullptr;
+// Whether this program was started with SIGPIPE ignored: what a program it
+// starts is given back (process.cpp).
+bool   g_pipe_started_ignored = false;
 okl_ulong* g_auxv = nullptr;
 
 void record(int argc, char** argv, char** envp) {
@@ -124,12 +127,22 @@ bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
 // NOT A POLICY CHOICE ABOUT SIGNALS IN GENERAL. This is the one signal an
 // ordinary openkal operation provokes; the rest are left exactly as this program
 // was started with.
+//
+// AND IT IS THIS PROGRAM'S, NOT PASSED ON. An ignored disposition survives
+// `execve', so every program started from here would otherwise begin with
+// SIGPIPE ignored --- `yes | head' inside a started shell then reports a write
+// error instead of ending, and a shell cannot undo an ignore it was started
+// with. What was found here is recorded, and `kal_process_start' gives a
+// started program the disposition this one was started with (process.cpp).
 [[gnu::constructor(101)]] void quiet_the_signal_openkal_cannot_report() {
     // struct k_sigaction as this kernel takes it: handler, flags, restorer, mask.
-    struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; }
-        ignore{ reinterpret_cast<void*>(1) /* SIG_IGN */, 0, nullptr, 0 };
-    okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
-             reinterpret_cast<okl_long>(&ignore), 0, sizeof ignore.mask);
+    struct k_sigaction { void* handler; unsigned long flags; void* restorer; unsigned long mask; };
+    k_sigaction ignore{ reinterpret_cast<void*>(1) /* SIG_IGN */, 0, nullptr, 0 };
+    k_sigaction found{};
+    if (!okl::failed(okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
+                              reinterpret_cast<okl_long>(&ignore),
+                              reinterpret_cast<okl_long>(&found), sizeof ignore.mask)))
+        okl::g_pipe_started_ignored = found.handler == reinterpret_cast<void*>(1);
 }
 
 [[gnu::constructor(101)]] void capture(int argc, char** argv, char** envp) {

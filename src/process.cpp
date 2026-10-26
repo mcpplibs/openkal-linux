@@ -3,7 +3,7 @@
 #include <openkal/process.h>
 #include <openkal/memory.h>
 
-namespace okl { extern char** g_envp; okl_ulong auxval(okl_ulong key); }
+namespace okl { extern char** g_envp; extern bool g_pipe_started_ignored; okl_ulong auxval(okl_ulong key); }
 
 namespace {
 
@@ -569,6 +569,15 @@ int kal_process_spawn(const kal_spawn* how,
         // comes into existence at all --- there is nothing to create beforehand,
         // which is why the interface reports the identity rather than taking it.
         if (unit) okl::sys(okl::nr_setpgid, 0, join);
+
+        // SIGPIPE AS THIS PROGRAM WAS STARTED WITH, not as this implementation
+        // set it for its own writes (env.cpp): an ignore would outlive `execve'.
+        if (!okl::g_pipe_started_ignored) {
+            struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; }
+                standard{ nullptr /* SIG_DFL */, 0, nullptr, 0 };
+            okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
+                     reinterpret_cast<okl_long>(&standard), 0, sizeof standard.mask);
+        }
 
         if (bind) {
             // 9 is SIGKILL: the binding must not be something the started program
