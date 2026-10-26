@@ -322,9 +322,14 @@ extern "C" {
 // kinds exist since 0.17 and are told apart by the top byte, which no
 // identifier reaches: this program itself, and a program found by its
 // identifier, which carries the descriptor the kernel gave for it (`pidfd')
-// in the bits above the identifier.
+// in the bits above the identifier. Since 0.18 a third: a program found by
+// its identifier that the kernel will not give a descriptor for (another
+// namespace's, or a kernel before 5.3), observed through its /proc entry, with
+// the low bits of its start in the bits above the identifier --- the start the
+// open recorded, so that the identifier given to another program reads as the
+// first one ended (openkal `kal_process_open_id').
 namespace {
-constexpr unsigned kind_child = 0, kind_self = 1, kind_opened = 2;
+constexpr unsigned kind_child = 0, kind_self = 1, kind_opened = 2, kind_observed = 3;
 inline unsigned handle_kind(kal_process h) { return static_cast<unsigned>(h.h >> 56); }
 inline okl_long handle_pid(kal_process h) { return static_cast<okl_long>(h.h & 0xffffffffu); }
 }  // namespace
@@ -751,7 +756,7 @@ void kal_process_channel_close(kal_stream s) {
 int kal_process_wait(kal_process h, int* status, int* terminated_by_environment) {
     if (h.h == 0) return kal_err_invalid;
     if (handle_kind(h) == kind_self) return kal_err_invalid;
-    if (handle_kind(h) == kind_opened) return kal_err_not_supported;
+    if (handle_kind(h) == kind_opened || handle_kind(h) == kind_observed) return kal_err_not_supported;
     int st = 0;
     for (;;) {
         const okl_long r = okl::sys(okl::nr_wait4, static_cast<okl_long>(h.h),
@@ -784,7 +789,7 @@ int kal_process_wait(kal_process h, int* status, int* terminated_by_environment)
 int kal_process_terminate(kal_process h) {
     if (h.h == 0) return kal_err_invalid;
     if (handle_kind(h) == kind_self) return kal_err_invalid;
-    if (handle_kind(h) == kind_opened) return kal_err_not_supported;
+    if (handle_kind(h) == kind_opened || handle_kind(h) == kind_observed) return kal_err_not_supported;
     const okl_long r = okl::sys(okl::nr_kill, static_cast<okl_long>(h.h), 15 /* SIGTERM */);
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
@@ -971,31 +976,74 @@ bool open_id_available() {
     return v == 1;
 }
 
-// /proc/<pid>/stat: the fields after the name, which is in parentheses and may
-// itself contain them, so the last `)' is where the fields begin. Field 22 is
-// when the program started, in the kernel's clock ticks since boot.
-bool started_ticks(okl_long pid, okl_u64& ticks) {
+// /proc/<pid>/stat, or /proc/self/stat for pid 0, read whole into `b'; the
+// length, or 0 when there is no such entry.
+okl_long read_stat(okl_long pid, char (&b)[1024]) {
     char path[40] = "/proc/";
-    char* o = put_decimal(path + 6, static_cast<okl_uptr>(pid));
+    char* o = path + 6;
+    if (pid == 0) { okl::copy(o, "self", 4); o += 4; }
+    else o = put_decimal(o, static_cast<okl_uptr>(pid));
     okl::copy(o, "/stat", 6);
     const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
                                  okl::o_rdonly | okl::o_cloexec, 0);
-    if (okl::failed(fd)) return false;
-    char b[1024];
+    if (okl::failed(fd)) return 0;
     const okl_long n = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(b), sizeof b - 1);
     okl::sys(okl::nr_close, fd);
-    if (n <= 0) return false;
+    return n > 0 ? n : 0;
+}
+
+// The fields after the name, which is in parentheses and may itself contain
+// them, so the last `)' is where the fields begin: the position of field
+// `wanted' (the state is 3, the processor times 14 and 15, the start 22), or -1.
+okl_long stat_field(const char* b, okl_long n, int wanted) {
     okl_long close = -1;
     for (okl_long i = 0; i < n; ++i) if (b[i] == ')') close = i;
-    if (close < 0) return false;
+    if (close < 0) return -1;
     int field = 2;                                   // the name was field 2
     okl_long i = close + 1;
-    while (i < n && field < 22) { if (b[i] == ' ') ++field; ++i; }
-    if (field != 22) return false;
+    while (i < n && field < wanted) { if (b[i] == ' ') ++field; ++i; }
+    return field == wanted && i < n ? i : -1;
+}
+
+okl_u64 stat_number(const char* b, okl_long n, int wanted, bool& ok) {
+    const okl_long at = stat_field(b, n, wanted);
+    ok = at >= 0;
     okl_u64 v = 0;
-    while (i < n && b[i] >= '0' && b[i] <= '9') v = v * 10 + static_cast<okl_u64>(b[i++] - '0');
-    ticks = v;
-    return true;
+    for (okl_long i = at; ok && i < n && b[i] >= '0' && b[i] <= '9'; ++i) v = v * 10 + static_cast<okl_u64>(b[i] - '0');
+    return v;
+}
+
+// Field 22: when the program started, in the kernel's clock ticks since boot.
+// Of this program (pid 0) through /proc/self: under a sandbox that numbers its
+// programs apart from the /proc it shows, `getpid' names another program's entry
+// --- measured beneath a language server's own sandbox, every instance read pid
+// 1's start, and a killed instance and its restart were one program.
+bool started_ticks(okl_long pid, okl_u64& ticks) {
+    char b[1024];
+    const okl_long n = read_stat(pid, b);
+    bool ok = false;
+    ticks = stat_number(b, n, 22, ok);
+    return ok;
+}
+
+// The state letter (field 3), or 0 when there is no entry: a program whose
+// entry is gone, or is Z or X, has ended.
+char stat_state(okl_long pid) {
+    char b[1024];
+    const okl_long n = read_stat(pid, b);
+    const okl_long at = stat_field(b, n, 3);
+    return at >= 0 ? b[at] : 0;
+}
+
+// This program's number as the /proc it shows names it, which is the number
+// another program finds it by there; `getpid' where there is no /proc.
+okl_long self_number() {
+    char b[24];
+    const okl_long n = okl::sys(okl::nr_readlinkat, okl::at_fdcwd, reinterpret_cast<okl_long>("/proc/self"),
+                                reinterpret_cast<okl_long>(b), sizeof b);
+    okl_long v = 0;
+    if (n > 0) for (okl_long i = 0; i < n && b[i] >= '0' && b[i] <= '9'; ++i) v = v * 10 + (b[i] - '0');
+    return v > 0 ? v : okl::sys(okl::nr_getpid);
 }
 
 okl_u64 ticks_to_ns(okl_u64 t) {
@@ -1007,13 +1055,25 @@ okl_u64 ticks_to_ns(okl_u64 t) {
 // The processor time of a program, through the clock the kernel keeps for
 // every program (`MAKE_PROCESS_CPUCLOCK(pid, CPUCLOCK_SCHED)'): nanoseconds,
 // for any program the caller may ask about.
+//
+// A program this one cannot name to the kernel --- one numbered by another
+// namespace, observed through /proc --- is answered from its entry's processor
+// times (fields 14 and 15, in clock ticks).
 bool cpu_ns(okl_long pid, bool self, okl_u64& out) {
     const okl_long clock = self ? 2 /* CLOCK_PROCESS_CPUTIME_ID */
                                 : static_cast<okl_long>(static_cast<int>((~static_cast<unsigned>(pid)) << 3) | 2);
     struct { okl_long sec, nsec; } ts{};
     const okl_long r = okl::sys(okl::nr_clock_gettime, clock, reinterpret_cast<okl_long>(&ts));
-    if (okl::failed(r)) return false;
-    out = static_cast<okl_u64>(ts.sec) * 1000000000ull + static_cast<okl_u64>(ts.nsec);
+    if (!okl::failed(r)) {
+        out = static_cast<okl_u64>(ts.sec) * 1000000000ull + static_cast<okl_u64>(ts.nsec);
+        return true;
+    }
+    char b[1024];
+    const okl_long n = read_stat(self ? 0 : pid, b);
+    bool user_ok = false, system_ok = false;
+    const okl_u64 user = stat_number(b, n, 14, user_ok), system = stat_number(b, n, 15, system_ok);
+    if (!user_ok || !system_ok) return false;
+    out = ticks_to_ns(user + system);
     return true;
 }
 
@@ -1022,6 +1082,12 @@ bool cpu_ns(okl_long pid, bool self, okl_u64& out) {
 // identifier: its descriptor is readable once it has ended.
 bool has_ended(kal_process h) {
     if (handle_kind(h) == kind_self) return false;
+    if (handle_kind(h) == kind_observed) {
+        const char state = stat_state(handle_pid(h));
+        okl_u64 t = 0;
+        return state == 0 || state == 'Z' || state == 'X' || !started_ticks(handle_pid(h), t)
+            || (t & 0xffffffu) != ((h.h >> 32) & 0xffffffu);
+    }
     if (handle_kind(h) == kind_opened) {
         const okl_long fd = static_cast<okl_long>((h.h >> 32) & 0xffffu) - 1;
         if (fd < 0) return false;
@@ -1054,9 +1120,26 @@ int kal_process_self(kal_process* out) {
 int kal_process_open_id(kal_u64 id, kal_process* out) {
     if (out == nullptr || id == 0 || id > 0x7fffffffu) return id == 0 || out == nullptr
                                                              ? kal_err_invalid : kal_err_not_found;
-    if (!open_id_available()) return kal_err_not_supported;
+    // NUMBERED AS /proc NUMBERS IT, WHERE THE KERNEL DOES NOT. A program in
+    // another namespace than this one's --- a sandbox that shows the system's
+    // /proc --- is not found by `pidfd_open', and a kernel before 5.3 has no
+    // such call; its entry is observed instead, with no descriptor: ended when
+    // the entry is gone or is a zombie's.
+    const auto observed = [&]() -> int {
+        const char state = stat_state(static_cast<okl_long>(id));
+        okl_u64 t = 0;
+        if (state == 0 || state == 'Z' || state == 'X' || !started_ticks(static_cast<okl_long>(id), t))
+            return kal_err_not_found;
+        *out = kal_process{ (static_cast<kal_uintptr>(kind_observed) << 56)
+                            | (static_cast<kal_uintptr>(t & 0xffffffu) << 32) | static_cast<kal_uintptr>(id) };
+        return kal_ok;
+    };
+    if (!open_id_available()) {
+        if (stat_state(0) == 0) return kal_err_not_supported;
+        return observed();
+    }
     const okl_long fd = okl::sys(okl::nr_pidfd_open, static_cast<okl_long>(id), 0);
-    if (fd == -3 /* ESRCH */) return kal_err_not_found;
+    if (fd == -3 /* ESRCH */) return observed();
     if (okl::failed(fd)) return okl::translate(fd);
     if (fd >= 0xffff) { okl::sys(okl::nr_close, fd); return kal_err_no_memory; }
     okl::sys(okl::nr_fcntl, fd, okl::f_setfd, okl::fd_cloexec);
@@ -1071,9 +1154,9 @@ int kal_process_info(kal_process p, kal_u32 wanted, kal_program_info* out) {
     const kal_u32 self = out->self_size;
     kal_program_info v{};
     v.self_size = self;
-    const okl_long pid = handle_pid(p);
     const bool me = handle_kind(p) == kind_self;
-    v.id = static_cast<kal_u64>(pid);
+    const okl_long pid = handle_pid(p);
+    v.id = static_cast<kal_u64>(me ? self_number() : pid);
     v.present |= KAL_PINFO_ID;
     const bool ended = has_ended(p);
     v.ended = ended ? 1u : 0u;
@@ -1083,7 +1166,7 @@ int kal_process_info(kal_process p, kal_u32 wanted, kal_program_info* out) {
         // Read, then checked again: a program found by its identifier that
         // ended meanwhile may have had its number given to another, whose start
         // this would have read.
-        if (started_ticks(pid, t) && !has_ended(p)) {
+        if (started_ticks(me ? 0 : pid, t) && !has_ended(p)) {
             v.started_ns = ticks_to_ns(t);
             v.present |= KAL_PINFO_STARTED;
         }
@@ -1129,7 +1212,7 @@ kal_uintptr kal_process_props(void) {
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
          | KAL_PROCESS_PROP_JOB
-         | (open_id_available() ? KAL_PROCESS_PROP_OPEN_ID : 0u)
+         | (open_id_available() || stat_state(0) != 0 ? KAL_PROCESS_PROP_OPEN_ID : 0u)
          // AGREES WITH `kal_process_stop_requested', because the header
          // defines null there as the absence this position reports. Read and
          // never armed: asking what an implementation can do must not install a
