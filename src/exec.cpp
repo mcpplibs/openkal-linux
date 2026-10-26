@@ -1,6 +1,8 @@
 #include "sys.h"
 #include <openkal/exec.h>
 
+namespace okl { okl_ulong auxval(okl_ulong key); }
+
 // openkal.exec on this kernel.
 //
 // A mapping obtained writable and made executable afterwards. The kernel places
@@ -18,7 +20,18 @@
 
 namespace {
 
-constexpr okl_uptr kPage = 4096;
+// The kernel's page, as it told this program at inception (AT_PAGESZ). Four
+// kibibytes was written here, and an aarch64 kernel built for sixteen or
+// sixty-four rounds every protection to its own page, so a part published at a
+// four-kibibyte boundary would have taken its neighbour with it.
+okl_uptr page() {
+    static okl_uptr p = 0;
+    if (p == 0) {
+        const okl_ulong a = okl::auxval(6 /* AT_PAGESZ */);
+        p = (a != 0 && (a & (a - 1)) == 0) ? static_cast<okl_uptr>(a) : 4096;
+    }
+    return p;
+}
 
 okl_uptr round_up(okl_uptr n, okl_uptr to) { return (n + to - 1) & ~(to - 1); }
 
@@ -28,7 +41,7 @@ extern "C" {
 
 void* kal_exec_alloc(kal_uintptr size) {
     if (size == 0) return nullptr;
-    const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), kPage);
+    const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), page());
     const okl_long r = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(bytes),
                                 okl::prot_read | okl::prot_write,
                                 okl::map_private | okl::map_anonymous, -1, 0);
@@ -38,7 +51,7 @@ void* kal_exec_alloc(kal_uintptr size) {
 
 int kal_exec_publish(void* p, kal_uintptr size) {
     if (p == nullptr || size == 0) return kal_err_invalid;
-    const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), kPage);
+    const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), page());
     const okl_long r = okl::sys(okl::nr_mprotect, reinterpret_cast<okl_long>(p),
                                 static_cast<okl_long>(bytes),
                                 okl::prot_read | okl::prot_exec);
@@ -85,9 +98,25 @@ int kal_exec_publish(void* p, kal_uintptr size) {
     return kal_ok;
 }
 
+// PART OF A REGION (0.17): the kernel protects per page, so a part is a run of
+// whole pages, and a part that is not is refused rather than rounded --- a
+// rounded part would take writable data beside it out of reach.
+int kal_exec_publish_part(void* region, kal_uintptr offset, kal_uintptr size) {
+    const okl_uptr g = page();
+    if (region == nullptr || size == 0 || (offset & (g - 1)) != 0 || (size & (g - 1)) != 0
+        || (reinterpret_cast<okl_uptr>(region) & (g - 1)) != 0)
+        return kal_err_invalid;
+    const okl_long r = okl::sys(okl::nr_mprotect,
+                                reinterpret_cast<okl_long>(static_cast<char*>(region) + offset),
+                                static_cast<okl_long>(size), okl::prot_read | okl::prot_exec);
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
+kal_uintptr kal_exec_granularity(void) { return page(); }
+
 void kal_exec_free(void* p, kal_uintptr size) {
     if (p == nullptr || size == 0) return;
-    const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), kPage);
+    const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), page());
     okl::sys(okl::nr_munmap, reinterpret_cast<okl_long>(p),
              static_cast<okl_long>(bytes));
 }

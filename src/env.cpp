@@ -15,6 +15,9 @@ namespace okl {
 int    g_argc = 0;
 char** g_argv = nullptr;
 char** g_envp = nullptr;
+// Whether this program was started with SIGPIPE ignored: what a program it
+// starts is given back (process.cpp).
+bool   g_pipe_started_ignored = false;
 okl_ulong* g_auxv = nullptr;
 
 void record(int argc, char** argv, char** envp) {
@@ -124,19 +127,35 @@ bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
 // NOT A POLICY CHOICE ABOUT SIGNALS IN GENERAL. This is the one signal an
 // ordinary openkal operation provokes; the rest are left exactly as this program
 // was started with.
+//
+// AND IT IS THIS PROGRAM'S, NOT PASSED ON. An ignored disposition survives
+// `execve', so every program started from here would otherwise begin with
+// SIGPIPE ignored --- `yes | head' inside a started shell then reports a write
+// error instead of ending, and a shell cannot undo an ignore it was started
+// with. What was found here is recorded, and `kal_process_start' gives a
+// started program the disposition this one was started with (process.cpp).
 [[gnu::constructor(101)]] void quiet_the_signal_openkal_cannot_report() {
     // struct k_sigaction as this kernel takes it: handler, flags, restorer, mask.
-    struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; }
-        ignore{ reinterpret_cast<void*>(1) /* SIG_IGN */, 0, nullptr, 0 };
-    okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
-             reinterpret_cast<okl_long>(&ignore), 0, sizeof ignore.mask);
+    struct k_sigaction { void* handler; unsigned long flags; void* restorer; unsigned long mask; };
+    k_sigaction ignore{ reinterpret_cast<void*>(1) /* SIG_IGN */, 0, nullptr, 0 };
+    k_sigaction found{};
+    if (!okl::failed(okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
+                              reinterpret_cast<okl_long>(&ignore),
+                              reinterpret_cast<okl_long>(&found), sizeof ignore.mask)))
+        okl::g_pipe_started_ignored = found.handler == reinterpret_cast<void*>(1);
 }
 
+// THE PUBLISHED HANDLE FIRST, THE REGISTERS ONLY WHERE THERE IS NONE. The
+// check above tells a shifted vector from a real one, not every set of
+// register contents from one: a static program over musl (an ok image's M3
+// program) passed it with whatever the registers held, and its image saw no
+// environment at all. `environ' is the C library's own record of the vectors
+// it was started with, so it is read wherever the library has one.
 [[gnu::constructor(101)]] void capture(int argc, char** argv, char** envp) {
     if (okl::g_argv != nullptr) return;
-    if (plausible(argc, argv, envp)) { okl::record(argc, argv, envp); return; }
     char** rargv = nullptr; char** renvp = nullptr; int rargc = 0;
-    if (recover(&rargv, &rargc, &renvp)) okl::record(rargc, rargv, renvp);
+    if (recover(&rargv, &rargc, &renvp)) { okl::record(rargc, rargv, renvp); return; }
+    if (plausible(argc, argv, envp)) okl::record(argc, argv, envp);
 }
 }  // namespace
 
@@ -200,6 +219,37 @@ kal_intptr kal_env_var_at(kal_uintptr index, char* out, kal_uintptr cap) {
         return give(entry, i, out, cap);
     }
     return -kal_err_not_found;
+}
+
+// THE IMAGE THE KERNEL STARTED (0.17). `/proc/self/exe' names the file the
+// kernel mapped, resolved; where the pseudo-file system is not mounted, the
+// name the kernel was given (AT_EXECFN), which is the starter's spelling and
+// may be relative to where the starter was --- the environment's answer
+// either way, which is what the declaration asks for.
+// A program built for its environment was loaded by nothing the interface
+// names (clause 12: only an image has a loader to name).
+kal_intptr kal_env_loader(char* out, kal_uintptr cap) {
+    (void)out; (void)cap;
+    return -kal_err_not_found;
+}
+
+kal_intptr kal_env_image(char* out, kal_uintptr cap) {
+    char buf[4096];
+    const okl_long n = okl::sys(okl::nr_readlinkat, okl::at_fdcwd,
+                                reinterpret_cast<okl_long>("/proc/self/exe"),
+                                reinterpret_cast<okl_long>(buf), sizeof buf);
+    if (!okl::failed(n) && n > 0 && n < static_cast<okl_long>(sizeof buf))
+        return give(buf, static_cast<kal_uintptr>(n), out, cap);
+    if (const okl_ulong fn = okl::auxval(31 /* AT_EXECFN */); fn != 0) {
+        const char* name = reinterpret_cast<const char*>(fn);
+        return give(name, okl::length(name), out, cap);
+    }
+    return -kal_err_not_found;
+}
+
+// For conventions only, as the declaration restricts it.
+kal_intptr kal_env_system(char* out, kal_uintptr cap) {
+    return give("linux", 5, out, cap);
 }
 
 }
