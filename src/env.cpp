@@ -220,6 +220,13 @@ kal_intptr kal_env_var_at(kal_uintptr index, char* out, kal_uintptr cap) {
 // name the kernel was given (AT_EXECFN), which is the starter's spelling and
 // may be relative to where the starter was --- the environment's answer
 // either way, which is what the declaration asks for.
+// A program built for its environment was loaded by nothing the interface
+// names (clause 12: only an image has a loader to name).
+kal_intptr kal_env_loader(char* out, kal_uintptr cap) {
+    (void)out; (void)cap;
+    return -kal_err_not_found;
+}
+
 kal_intptr kal_env_image(char* out, kal_uintptr cap) {
     char buf[4096];
     const okl_long n = okl::sys(okl::nr_readlinkat, okl::at_fdcwd,
