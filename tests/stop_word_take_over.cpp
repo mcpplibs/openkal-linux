@@ -25,6 +25,17 @@ void check(bool held, const char* what) {
 }
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--hang-up") == 0) {
+        // 0.18.1: the closing of the terminal is a request to end, taken over
+        // with the others, and the program ends as it would have.
+        const kal_u32* word = kal_process_stop_requested();
+        if (word == nullptr) return 90;
+        ::kill(::getpid(), SIGHUP);
+        for (int i = 0; i < 1000 && *word == 0; ++i) ::usleep(1000);
+        if (*word == 0) return 91;
+        kal_process_end_as_requested();
+        return 92;
+    }
     if (argc > 1 && std::strcmp(argv[1], "--end-as-requested") == 0) {
         const kal_u32* word = kal_process_stop_requested();
         if (word == nullptr) return 90;
@@ -57,6 +68,16 @@ int main(int argc, char** argv) {
     ::waitpid(child, &st, 0);
     check(WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM,
           "a program that ends as requested is reported to its starter as ended by the request");
+
+    const pid_t hung = ::fork();
+    if (hung == 0) {
+        ::execl("/proc/self/exe", argv[0], "--hang-up", nullptr);
+        ::_exit(93);
+    }
+    st = 0;
+    ::waitpid(hung, &st, 0);
+    check(WIFSIGNALED(st) && WTERMSIG(st) == SIGHUP,
+          "a hang-up is taken over as a request, and the program ends as it would have");
 
     if (failures == 0) std::printf("openkal-linux: the stop word is taken over and given back\n");
     return failures == 0 ? 0 : 1;

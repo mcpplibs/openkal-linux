@@ -951,7 +951,11 @@ const kal_u32* kal_process_stop_requested(void) {
     // caller is told what the first found rather than arming again.
     int state = __atomic_load_n(&g_stop_armed, __ATOMIC_ACQUIRE);
     if (state == 0) {
-        const bool ok = arm_one(15) && arm_one(2);   // SIGTERM, SIGINT
+        // SIGTERM, SIGINT and SIGHUP (0.18.1): the terminal that started a
+        // program closing is a request to end it as much as the other two, and
+        // a program that took the requests over and not this one was ended by
+        // it before it could finish in order.
+        const bool ok = arm_one(15) && arm_one(2) && arm_one(1);
         state = ok ? 1 : -1;
         __atomic_store_n(&g_stop_armed, state, __ATOMIC_RELEASE);
     }
