@@ -145,11 +145,17 @@ bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
         okl::g_pipe_started_ignored = found.handler == reinterpret_cast<void*>(1);
 }
 
+// THE PUBLISHED HANDLE FIRST, THE REGISTERS ONLY WHERE THERE IS NONE. The
+// check above tells a shifted vector from a real one, not every set of
+// register contents from one: a static program over musl (an ok image's M3
+// program) passed it with whatever the registers held, and its image saw no
+// environment at all. `environ' is the C library's own record of the vectors
+// it was started with, so it is read wherever the library has one.
 [[gnu::constructor(101)]] void capture(int argc, char** argv, char** envp) {
     if (okl::g_argv != nullptr) return;
-    if (plausible(argc, argv, envp)) { okl::record(argc, argv, envp); return; }
     char** rargv = nullptr; char** renvp = nullptr; int rargc = 0;
-    if (recover(&rargv, &rargc, &renvp)) okl::record(rargc, rargv, renvp);
+    if (recover(&rargv, &rargc, &renvp)) { okl::record(rargc, rargv, renvp); return; }
+    if (plausible(argc, argv, envp)) okl::record(argc, argv, envp);
 }
 }  // namespace
 
