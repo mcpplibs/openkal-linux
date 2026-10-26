@@ -135,6 +135,13 @@ kal_uintptr volume_props(int fd) {
     const kal_uintptr conservative =
         KAL_FS_PROP_MODIFIED_TIME | KAL_FS_PROP_ATOMIC_RENAME
         | KAL_FS_PROP_LOCKS | KAL_FS_PROP_CAPACITY;
+    // A NAME HELD OPEN IS REMOVED AT ONCE (0.17, clause 7.14) on every format
+    // whose names the VFS itself keeps: `unlink' drops the entry and the inode
+    // lives on until its last descriptor closes. Not in the conservative set,
+    // because a format the VFS does not keep may not: a network volume's client
+    // renames a held file to a hidden name and removes it at the close, and a
+    // user-space format may do the same, so the directory is not empty.
+    const kal_uintptr local = conservative | KAL_FS_PROP_REMOVE_OPEN;
     if (fd < 0) return 0;
 
     okl::kstatfs sf{};
@@ -152,12 +159,12 @@ kal_uintptr volume_props(int fd) {
         case okl::fs_ext234: case okl::fs_btrfs: case okl::fs_xfs:
         case okl::fs_f2fs:   case okl::fs_tmpfs: case okl::fs_overlay:
         case okl::fs_bcachefs:
-            return conservative | KAL_FS_PROP_CASE_SENSITIVE
+            return local | KAL_FS_PROP_CASE_SENSITIVE
                  | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
                  | KAL_FS_PROP_EXECUTABLE
                  | KAL_FS_PROP_RENAME_NO_REPLACE | KAL_FS_PROP_LOCAL_ENDPOINT;
         case okl::fs_zfs:
-            return conservative | KAL_FS_PROP_CASE_SENSITIVE
+            return local | KAL_FS_PROP_CASE_SENSITIVE
                  | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
                  | KAL_FS_PROP_EXECUTABLE | KAL_FS_PROP_LOCAL_ENDPOINT;
 
@@ -175,14 +182,14 @@ kal_uintptr volume_props(int fd) {
         // names another. `symlink' on such a volume reports EPERM, and this is
         // where a caller learns that before it tries.
         case okl::fs_msdos: case okl::fs_exfat:
-            return conservative;
+            return local;
 
         // A case-insensitive namespace, with nodes that name others.
         case okl::fs_ntfs: case okl::fs_ntfs3:
-            return conservative | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS;
+            return local | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS;
         // The same, on a format that stores a mode.
         case okl::fs_hfsplus:
-            return conservative | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
+            return local | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
                  | KAL_FS_PROP_EXECUTABLE;
 
         default:
