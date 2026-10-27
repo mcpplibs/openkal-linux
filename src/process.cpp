@@ -929,8 +929,12 @@ void stop_handler(int signo) {
     __atomic_compare_exchange_n(&g_stop_signal, &none, signo, false,
                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED);
     __atomic_store_n(&g_stop_word, 1u, __ATOMIC_RELEASE);
+    // PRIVATE, AS `kal_task_wait' WAITS (0.18.2). The kernel keys a private
+    // futex apart from a shared one at the same address, so a shared wake
+    // reached no context waiting through `kal_task_wait' with no bound, and a
+    // program that waits for its end to be requested never ended.
     okl::sys(okl::nr_futex, reinterpret_cast<okl_long>(&g_stop_word),
-             1 /* FUTEX_WAKE */, 0x7fffffff, 0, 0, 0);
+             okl::futex_wake | okl::futex_private, 0x7fffffff, 0, 0, 0);
 }
 
 // THE RESULT IS EXAMINED, AND IT WAS NOT WHEN THIS SHIPPED IN 0.11. An
