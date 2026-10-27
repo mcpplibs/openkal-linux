@@ -415,6 +415,16 @@ bool absolute_under(int fd, const char* name, okl_uptr len, char* out, okl_uptr 
     return true;
 }
 
+// Whether `name' reaches the file `fd' holds: the same device and inode.
+bool same_file(okl_long fd, const char* name) {
+    okl::kstat held{}, named{};
+    if (okl::failed(okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&held)))) return false;
+    if (okl::failed(okl::sys(okl::nr_newfstatat, okl::at_fdcwd, reinterpret_cast<okl_long>(name),
+                             reinterpret_cast<okl_long>(&named), 0)))
+        return false;
+    return held.dev == named.dev && held.ino == named.ino;
+}
+
 }  // namespace
 
 // EVERY ENVIRONMENT ENTRY IS `NAME=value' (0.17, process.h). Refused before
@@ -643,11 +653,18 @@ int kal_process_spawn(const kal_spawn* how,
         // the caller had no standard input and supplied none, the lowest free
         // number is 0, and a script would read its own descriptor as input.
         //
-        // What is given up: a script now sees `$0' as `/dev/fd/<n>' and not as
-        // a path under its directory, so one that locates its neighbours with
-        // `dirname "$0"' no longer finds them. That is the price of leaving a
-        // descriptor for the file and not for the directory, the same one
-        // `fexecve' charges. The descriptor still names the program: it can be
+        // A SCRIPT IS GIVEN ITS NAME WHERE THE NAME REACHES THE SAME FILE
+        // (0.18.1). Through the descriptor a script sees `$0' as `/dev/fd/<n>',
+        // and one that locates its neighbours with `dirname "$0"' --- a wrapper
+        // installed beside the files it runs, a test's stub provider --- finds
+        // none of them: measured in mcpp, whose provider stub wrote beside
+        // itself into `/dev/fd/ticks'. So a program that needs an interpreter is
+        // started by its absolute name, as every shell and `posix_spawn' start
+        // it, when that name is known and names the file the descriptor holds
+        // (the same device and inode, so the name grants nothing the descriptor
+        // did not). Only where it does not --- a base the kernel cannot name, a
+        // name rebound since it was opened --- is the descriptor kept, with the
+        // price stated above: the descriptor still names the program and can be
         // reopened through `/proc/self/fd/<n>', as `/proc/self/exe' can.
         //
         // Opened HERE, in the started image, and not where the preopens are made:
@@ -679,6 +696,10 @@ int kal_process_spawn(const kal_spawn* how,
                             reinterpret_cast<okl_long>(envs.slots), okl::at_empty_path);
         };
         okl_long why = start();
+        if (why == -okl::e_noent && named && same_file(exe, resolved))
+            why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
+                           reinterpret_cast<okl_long>(args.slots),
+                           reinterpret_cast<okl_long>(envs.slots));
         if (why == -okl::e_noent) {
             okl::sys(okl::nr_fcntl, exe, okl::f_setfd, 0);
             why = start();
