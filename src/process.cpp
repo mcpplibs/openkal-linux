@@ -344,7 +344,11 @@ inline okl_long handle_pid(kal_process h) { return static_cast<okl_long>(h.h & 0
 // the duplicate still allocates nothing. It costs the property `execveat'
 // bought, that the name is resolved through the descriptor, and is paid only
 // where `execveat' is unusable: from the first start under a translator this
-// implementation recognises, and after the first ENOSYS anywhere else.
+// implementation recognises, and, elsewhere, by each start that meets ENOSYS,
+// which falls back in the started image itself. That fallback is learned by
+// no other start: the image is a copy made by `clone' without shared memory,
+// so nothing it learns reaches this program, and the price is one refused
+// system call per start.
 //
 // Ported from the copy mcppls carried (vendor/openkal-linux 0.15.1), which set
 // the flag itself under PRoot; recognising the translator here removes that.
