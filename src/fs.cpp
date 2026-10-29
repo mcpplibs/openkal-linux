@@ -82,6 +82,25 @@ bool granted(preopen* t, kal_uintptr* n) {
     return true;
 }
 
+// A DIRECTORY HANDLE NAMES A DIRECTORY; IT DOES NOT READ ONE (0.18.3).
+//
+// Every `kal_dir' is a base: names are resolved beneath it (`*at'), a program
+// is started in it (`fchdir'), and it is described (`fstat', `fstatfs'). None
+// of these reads the directory, and `O_PATH' is the open that asks for no
+// access but naming. Reading happens only where entries are listed, and an
+// enumeration already opens a descriptor of its own through the handle, with
+// read access, at that moment.
+//
+// Until 0.18.2 the handles were opened for reading, and a directory the
+// program may search but not read could not be a base at all. Measured on
+// Android 14 under `run-as' (SELinux domain `runas_app', mcpp#857): the
+// preopen of `/' failed with EACCES, so every name resolved beneath the root,
+// and every program started by absolute name, failed before anything was
+// started --- reported as "not found", because the base it would have been
+// found in was never opened. The same program, its directory and its exec
+// path all worked when each step was called directly.
+constexpr okl_long dir_handle_flags = okl::o_path | okl::o_directory | okl::o_cloexec;
+
 preopen* table(kal_uintptr* count) {
     static preopen t[kMaxGrants];
     static kal_uintptr n = 2;
@@ -102,11 +121,9 @@ preopen* table(kal_uintptr* count) {
         else { g_cwd[0] = '.'; g_cwd[1] = '\0'; cwd_len = 1; }
 
         const okl_long fd0 = okl::sys(okl::nr_openat, okl::at_fdcwd,
-                                      reinterpret_cast<okl_long>("."),
-                                      okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+                                      reinterpret_cast<okl_long>("."), dir_handle_flags, 0);
         const okl_long fd1 = okl::sys(okl::nr_openat, okl::at_fdcwd,
-                                      reinterpret_cast<okl_long>("/"),
-                                      okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+                                      reinterpret_cast<okl_long>("/"), dir_handle_flags, 0);
         t[0] = { g_cwd, cwd_len, okl::failed(fd0) ? 0u : okl::pack(static_cast<int>(fd0)) };
         t[1] = { "/",   1,       okl::failed(fd1) ? 0u : okl::pack(static_cast<int>(fd1)) };
     }
@@ -398,7 +415,7 @@ int kal_fs_open_dir(kal_dir base, const char* name, kal_uintptr len, kal_dir* ou
     if (b < 0 || out == nullptr || !okl::acceptable(name, len)) return kal_err_invalid;
     okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
     const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf),
-                                 okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+                                 dir_handle_flags, 0);
     if (okl::failed(fd)) return okl::translate(fd);
     *out = kal_dir{ okl::pack(static_cast<int>(fd)) };
     return kal_ok;
