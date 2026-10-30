@@ -95,7 +95,7 @@ inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d, 
 
 enum : okl_long {
     nr_read = 0, nr_write = 1, nr_close = 3, nr_fstat = 5, nr_lseek = 8,
-    nr_mmap = 9, nr_mprotect = 10, nr_munmap = 11, nr_ioctl = 16,
+    nr_mmap = 9, nr_mprotect = 10, nr_munmap = 11, nr_ioctl = 16, nr_msync = 26,
     nr_readv = 19, nr_writev = 20, nr_sched_yield = 24, nr_nanosleep = 35,
     nr_getpid = 39, nr_clone = 56, nr_execve = 59, nr_exit = 60, nr_wait4 = 61,
     nr_kill = 62, nr_ftruncate = 77, nr_getcwd = 79, nr_fsync = 74,
@@ -197,7 +197,7 @@ enum : okl_long {
     nr_exit = 93, nr_exit_group = 94, nr_set_tid_address = 96, nr_futex = 98,
     nr_nanosleep = 101, nr_clock_gettime = 113, nr_clock_getres = 114,
     nr_sched_yield = 124, nr_kill = 129, nr_tgkill = 131, nr_gettid = 178,
-    nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226,
+    nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226, nr_msync = 227,
     nr_clone = 220, nr_execve = 221, nr_wait4 = 260, nr_renameat = 38,
     nr_dup3 = 24, nr_execveat = 281,
     nr_close_range = 436, nr_prlimit64 = 261, nr_dup2 = -1, nr_fcntl = 25,
@@ -323,7 +323,8 @@ enum : okl_long {
 #endif
     at_fdcwd = -100, at_removedir = 0x200, at_symlink_nofollow = 0x100,
     prot_read = 1, prot_write = 2, prot_exec = 4, prot_none = 0,
-    map_private = 2, map_anonymous = 0x20, map_stack = 0x20000,
+    map_shared = 1, map_private = 2, map_anonymous = 0x20, map_stack = 0x20000,
+    ms_async = 1,
     clock_monotonic = 1, clock_realtime = 0,
     futex_wait = 0, futex_wake = 1, futex_private = 128,
 };
