@@ -536,6 +536,41 @@ int start(void (*entry)(void*), void* arg, okl_uptr want, kal_task* out) {
 
 }  // namespace
 
+namespace {
+
+// A small number from a file of the kernel's: what /sys answers is one line.
+bool read_number(const char* path, okl_long& out) {
+    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+                                 okl::o_rdonly | okl::o_cloexec);
+    if (okl::failed(fd)) return false;
+    char text[32];
+    const okl_long n = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(text), static_cast<okl_long>(sizeof text));
+    okl::sys(okl::nr_close, fd);
+    if (okl::failed(n) || n <= 0) return false;
+    okl_long v = 0;
+    bool any = false;
+    for (okl_long i = 0; i < n && text[i] >= '0' && text[i] <= '9'; ++i) { v = v * 10 + (text[i] - '0'); any = true; }
+    out = v;
+    return any;
+}
+
+// `/sys/devices/system/cpu/cpu<n>/topology/<leaf>'.
+bool cpu_topology(unsigned long cpu, const char* leaf, okl_long& out) {
+    char path[96];
+    unsigned long at = 0;
+    for (const char* c = "/sys/devices/system/cpu/cpu"; *c; ++c) path[at++] = *c;
+    char digits[24];
+    int d = 0;
+    do { digits[d++] = static_cast<char>('0' + cpu % 10); cpu /= 10; } while (cpu);
+    while (d) path[at++] = digits[--d];
+    for (const char* c = "/topology/"; *c; ++c) path[at++] = *c;
+    for (const char* c = leaf; *c; ++c) { if (at + 1 >= sizeof path) return false; path[at++] = *c; }
+    path[at] = 0;
+    return read_number(path, out);
+}
+
+}  // namespace
+
 extern "C" {
 
 int kal_task_start(void (*entry)(void*), void* arg, kal_task* out) {
@@ -696,7 +731,53 @@ int kal_task_wake(const kal_u32* word, kal_uintptr count, kal_uintptr* woken) {
 // convention, and so does the block this implementation builds. Clause 7.10.
 kal_uintptr kal_task_props(void) {
     return KAL_TASK_PROP_PREEMPTIVE | KAL_TASK_PROP_PARALLEL
-         | KAL_TASK_PROP_WAIT_TIMEOUT | KAL_TASK_PROP_THREAD_LOCAL;
+         | KAL_TASK_PROP_WAIT_TIMEOUT | KAL_TASK_PROP_THREAD_LOCAL
+         | KAL_TASK_PROP_PRIORITY;
+}
+
+// THE CORES OF THE PROCESSORS THIS PROGRAM MAY RUN ON. The kernel states each
+// processor's package and core in sysfs on every architecture it supports; two
+// processors that share both are one core. A processor whose topology cannot
+// be read makes the answer "cannot say" rather than a guess.
+kal_uintptr kal_task_cores(void) {
+    unsigned long mask[128] = { 0 };
+    const okl_long n = okl::sys(okl::nr_sched_getaffinity, 0, static_cast<okl_long>(sizeof mask),
+                                reinterpret_cast<okl_long>(mask));
+    if (okl::failed(n) || n <= 0) return 0;
+    constexpr unsigned kMax = 1024;
+    okl_long seen[kMax];
+    unsigned count = 0;
+    const unsigned long bits = static_cast<unsigned long>(n) * 8;
+    constexpr unsigned long kWord = 8 * sizeof(unsigned long);
+    for (unsigned long cpu = 0; cpu < bits; ++cpu) {
+        if (!((mask[cpu / kWord] >> (cpu % kWord)) & 1ul)) continue;
+        okl_long package = 0, core = 0;
+        if (!cpu_topology(cpu, "physical_package_id", package) || !cpu_topology(cpu, "core_id", core)) return 0;
+        const okl_long key = (package << 32) | core;
+        bool known = false;
+        for (unsigned i = 0; i < count && !known; ++i) known = seen[i] == key;
+        if (known) continue;
+        if (count == kMax) return 0;
+        seen[count++] = key;
+    }
+    return count;
+}
+
+// THE CALLING THREAD'S SCHEDULING POLICY: the kernel's default, its batch
+// policy, and its idle policy, which runs only when nothing else wants the
+// processor. An unprivileged thread may lower its policy and may be refused
+// raising it again (RLIMIT_NICE), which is kal_err_permission.
+int kal_task_set_priority(kal_uintptr priority) {
+    okl_long policy;
+    switch (priority) {
+        case KAL_TASK_PRIORITY_DEFAULT:    policy = 0; break;   // SCHED_OTHER
+        case KAL_TASK_PRIORITY_LOW:        policy = 3; break;   // SCHED_BATCH
+        case KAL_TASK_PRIORITY_BACKGROUND: policy = 5; break;   // SCHED_IDLE
+        default: return kal_err_invalid;
+    }
+    int param = 0;   // struct sched_param: the static priority, 0 for these policies
+    const okl_long r = okl::sys(okl::nr_sched_setscheduler, 0, policy, reinterpret_cast<okl_long>(&param));
+    return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
 }
