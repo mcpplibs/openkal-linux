@@ -122,6 +122,11 @@ part; the property is not claimed. The mode is read once from /proc.
 call the `clock_gettime` the kernel places in every program (the vDSO, found
 through `AT_SYSINFO_EHDR`), and the system call remains where there is none.
 
+**A volume is asked once.** Whether a file may be started is a property of its
+volume as well as of its node (`KAL_INFO_EXECUTABLE`), and the volume's answer
+(`fstatfs`) is kept by the device number the node reports: a `stat` that wants the
+field makes one system call, not two. Eight volumes are kept.
+
 **What a program and a unit use.** `kal_process_info` reports `KAL_PINFO_MEMORY`:
 `VmRSS` and `VmHWM` of /proc/<pid>/status for a running program, and for a
 started program that has ended its peak from the record the kernel keeps until it
