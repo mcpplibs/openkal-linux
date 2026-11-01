@@ -220,6 +220,34 @@ namespace okl {
 // The volume's properties, for the interfaces outside this file that ask one
 // (openkal.net's rendezvous at a name).
 kal_uintptr volume_props_of(int fd) { return volume_props(fd); }
+
+// THE PROPERTIES OF A VOLUME, ONCE PER VOLUME (0.21). An enquiry that wants
+// whether a file may be started asks its volume (a format that records no such
+// bit answers nothing), and asked `fstatfs' once per enquiry: a compiler run as
+// an image made 71 thousand of them in one warm start, one beside every `stat'.
+// A volume's format does not change under a device number while it is mounted,
+// so the answer is kept by the device the kernel reports for the node; a slot
+// a later device needs is taken over (eight are kept).
+struct volume_answer { okl_u64 dev; kal_uintptr props; bool known; };
+volume_answer g_volumes[8];
+unsigned g_volume_next = 0;
+volatile int g_volume_lock = 0;
+
+kal_uintptr volume_props_on(okl_u64 dev, int fd) {
+    while (__atomic_exchange_n(&g_volume_lock, 1, __ATOMIC_ACQUIRE)) okl::sys(okl::nr_sched_yield);
+    for (auto const& v : g_volumes)
+        if (v.known && v.dev == dev) {
+            const kal_uintptr props = v.props;
+            __atomic_store_n(&g_volume_lock, 0, __ATOMIC_RELEASE);
+            return props;
+        }
+    __atomic_store_n(&g_volume_lock, 0, __ATOMIC_RELEASE);
+    const kal_uintptr props = volume_props(fd);
+    while (__atomic_exchange_n(&g_volume_lock, 1, __ATOMIC_ACQUIRE)) okl::sys(okl::nr_sched_yield);
+    g_volumes[g_volume_next++ % 8] = volume_answer{ dev, props, true };
+    __atomic_store_n(&g_volume_lock, 0, __ATOMIC_RELEASE);
+    return props;
+}
 }  // namespace okl
 
 namespace {
@@ -236,7 +264,8 @@ namespace {
 // The exception is KAL_INFO_EXECUTABLE, which is a property of the volume as
 // well as of the node: a format that stores no mode reports execute bits the
 // mount chose, and reporting those would be answering for the volume. The
-// volume is asked only when the caller wants the field, and only for a file.
+// volume is asked only when the caller wants the field, and only for a file,
+// and once per volume.
 void fill_info(const okl::kstat& st, kal_u32 wanted, kal_node_info* out,
                int volume_fd) {
     const kal_u32 self = out->self_size;
@@ -259,7 +288,7 @@ void fill_info(const okl::kstat& st, kal_u32 wanted, kal_node_info* out,
         __builtin_offsetof(kal_node_info, executable) + sizeof v.executable);
     if ((wanted & KAL_INFO_EXECUTABLE) != 0 && self >= reaches
         && v.kind == kal_node_file
-        && (volume_props(volume_fd) & KAL_FS_PROP_EXECUTABLE) != 0) {
+        && (okl::volume_props_on(st.dev, volume_fd) & KAL_FS_PROP_EXECUTABLE) != 0) {
         v.present   |= KAL_INFO_EXECUTABLE;
         v.executable = (st.mode & 0111u) != 0 ? 1 : 0;
     }
@@ -485,6 +514,43 @@ int kal_fs_truncate(kal_file f, kal_u64 size) {
     if (fd < 0) return kal_err_invalid;
     const okl_long r = okl::sys(okl::nr_ftruncate, fd, static_cast<okl_long>(size));
     return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
+// TRANSFERS AT AN OFFSET (openkal 0.20): the kernel's own `pread64' and
+// `pwrite64', which neither use nor move the position. A write at an offset to
+// a file opened for appending lands at the end, which is this kernel's answer
+// and one the specification names. The write is completed as a stream's is,
+// and an interruption is retried rather than reported (clause 7.5).
+kal_intptr kal_fs_read_at(kal_file f, void* buf, kal_uintptr len, kal_u64 offset) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0) return -kal_err_invalid;
+    for (;;) {
+        const okl_long r = okl::sys(okl::nr_pread64, fd, reinterpret_cast<okl_long>(buf),
+                                    static_cast<okl_long>(len), static_cast<okl_long>(offset));
+        if (okl::interrupted(r)) continue;
+        if (okl::failed(r)) return -okl::translate(r);
+        return static_cast<kal_intptr>(r);
+    }
+}
+
+kal_intptr kal_fs_write_at(kal_file f, const void* buf, kal_uintptr len, kal_u64 offset) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0) return -kal_err_invalid;
+    const auto* p = static_cast<const unsigned char*>(buf);
+    kal_uintptr done = 0;
+    while (done < len) {
+        const okl_long r = okl::sys(okl::nr_pwrite64, fd, reinterpret_cast<okl_long>(p + done),
+                                    static_cast<okl_long>(len - done),
+                                    static_cast<okl_long>(offset + done));
+        if (okl::interrupted(r)) continue;
+        if (okl::failed(r)) {
+            if (done != 0) return static_cast<kal_intptr>(done);
+            return -okl::translate(r);
+        }
+        if (r == 0) break;
+        done += static_cast<kal_uintptr>(r);
+    }
+    return static_cast<kal_intptr>(done);
 }
 
 int kal_fs_info(kal_dir base, const char* name, kal_uintptr len,

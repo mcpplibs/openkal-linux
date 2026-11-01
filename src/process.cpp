@@ -2,8 +2,15 @@
 #include "handle.h"
 #include <openkal/process.h>
 #include <openkal/memory.h>
+#include <openkal/task.h>
 
 namespace okl { extern char** g_envp; extern bool g_pipe_started_ignored; okl_ulong auxval(okl_ulong key); }
+// Defined with what a unit uses, below (0.21).
+namespace okl {
+int child_outcome(okl_long pid, bool block, int* status, int* terminated, bool& ended);
+void job_forget(okl_long unit);
+bool child_memory(okl_long pid, bool ended, okl_u64& now, okl_u64& peak);
+}
 
 namespace {
 
@@ -782,26 +789,13 @@ int kal_process_wait(kal_process h, int* status, int* terminated_by_environment)
     if (h.h == 0) return kal_err_invalid;
     if (handle_kind(h) == kind_self) return kal_err_invalid;
     if (handle_kind(h) == kind_opened || handle_kind(h) == kind_observed) return kal_err_not_supported;
-    int st = 0;
-    for (;;) {
-        const okl_long r = okl::sys(okl::nr_wait4, static_cast<okl_long>(h.h),
-                                    reinterpret_cast<okl_long>(&st), 0, 0);
-        if (okl::interrupted(r)) continue;
-        if (okl::failed(r)) return okl::translate(r);
-        break;
-    }
-    // The encoding is the kernel's: the low seven bits name the signal that
-    // ended the program and are zero when it ended by returning, in which case
-    // the next eight bits are what it returned.
-    const int signalled = st & 0x7f;
-    if (signalled == 0) {
-        if (status) *status = (st >> 8) & 0xff;
-        if (terminated_by_environment) *terminated_by_environment = 0;
-    } else {
-        if (status) *status = signalled;
-        if (terminated_by_environment) *terminated_by_environment = 1;
-    }
-    return kal_ok;
+    // NOT COLLECTED HERE (0.21): the program is waited for and left in the
+    // kernel's record until `kal_process_close', so that what it used --- its
+    // peak memory, which the record keeps --- can still be asked about. A
+    // program ended by its unit's limit is told apart by the unit (openkal 0.20).
+    bool ended = false;
+    return okl::child_outcome(static_cast<okl_long>(h.h & 0xffffffffu), true, status,
+                              terminated_by_environment, ended);
 }
 
 // ONE PROGRAM, WHATEVER UNIT IT IS IN.
@@ -873,11 +867,21 @@ int kal_process_job_terminate(kal_job j) {
 // so there is no handle to close --- and the operation exists so that a caller
 // need not know that. Where the unit IS a resource, releasing it must still not
 // end its members; the interface says so at the declaration.
-void kal_process_job_close(kal_job) { }
+void kal_process_job_close(kal_job j) { if (j.h != 0) okl::job_forget(static_cast<okl_long>(j.h)); }
 
 // Releasing the handle does not affect the program. A program that has not been
 // waited for continues, and this environment collects it when the caller exits.
 void kal_process_close(kal_process h) {
+    // A started program that has ended is collected now, which `kal_process_wait'
+    // did not do (0.21); one still running continues, as before.
+    if (handle_kind(h) == kind_child && h.h != 0) {
+        alignas(8) unsigned char info[128] = {};
+        okl_long r;
+        do r = okl::sys(okl::nr_waitid, 1 /* P_PID */, handle_pid(h), reinterpret_cast<okl_long>(info),
+                        4 | 1 /* WEXITED | WNOHANG */, 0);
+        while (okl::interrupted(r));
+        return;
+    }
     if (handle_kind(h) == kind_opened) {
         const okl_long fd = static_cast<okl_long>((h.h >> 32) & 0xffffu) - 1;
         if (fd >= 0) okl::sys(okl::nr_close, fd);
@@ -1208,6 +1212,16 @@ int kal_process_info(kal_process p, kal_u32 wanted, kal_program_info* out) {
         okl_u64 c = 0;
         if (cpu_ns(pid, me, c)) { v.cpu_ns = c; v.present |= KAL_PINFO_CPU; }
     }
+    // MEMORY (openkal 0.20): resident now and at most, from the kernel's record;
+    // of a started program that has ended, its peak from the record it keeps
+    // until it is collected. Only where the structure has room for the fields.
+    if ((wanted & KAL_PINFO_MEMORY) && self >= sizeof v) {
+        okl_u64 now = 0, peak = 0;
+        const bool ok = me ? okl::child_memory(0, false, now, peak)
+                     : handle_kind(p) == kind_child ? okl::child_memory(pid, ended, now, peak)
+                     : (!ended && okl::child_memory(pid, false, now, peak));
+        if (ok) { v.memory_bytes = now; v.memory_peak_bytes = peak; v.present |= KAL_PINFO_MEMORY; }
+    }
     const kal_u32 n = self < sizeof v ? self : static_cast<kal_u32>(sizeof v);
     okl::copy(reinterpret_cast<char*>(out), reinterpret_cast<const char*>(&v), n);
     return kal_ok;
@@ -1244,7 +1258,8 @@ kal_uintptr kal_process_props(void) {
          | KAL_PROCESS_PROP_EXIT_STATUS
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
-         | KAL_PROCESS_PROP_JOB
+         | KAL_PROCESS_PROP_JOB | KAL_PROCESS_PROP_JOB_USAGE
+         | KAL_PROCESS_PROP_JOB_LIMIT_SUPERVISED
          | (open_id_available() || stat_state(0) != 0 ? KAL_PROCESS_PROP_OPEN_ID : 0u)
          // AGREES WITH `kal_process_stop_requested', because the header
          // defines null there as the absence this position reports. Read and
@@ -1253,6 +1268,311 @@ kal_uintptr kal_process_props(void) {
          // actually been refused.
          | (__atomic_load_n(&g_stop_armed, __ATOMIC_ACQUIRE) == -1
                 ? 0u : KAL_PROCESS_PROP_STOP_REQUESTED);
+}
+
+
+// --- what a program and a unit use, and a limit on a unit (0.20) ------------
+//
+// A PROGRAM'S MEMORY is what this kernel says is resident for it, and the most
+// that ever was (/proc/<pid>/status: VmRSS and VmHWM). An ended program that has
+// not been collected keeps its peak in the record the kernel holds until it is
+// collected, and `waitid' with WNOWAIT reads it from there --- which is why
+// `kal_process_wait' leaves the program uncollected and `kal_process_close'
+// collects it (0.21): what it used remains readable while its handle is held.
+//
+// A UNIT IS A PROCESS GROUP, and the kernel records every program's group: the
+// programs in a unit are the entries of /proc whose group is the unit's, which
+// counts the programs its members started too. The kernel lists no group's
+// members, so a unit's use is a walk of /proc --- one read per program on the
+// machine, which is why nothing walks it unless a caller asked for a use or
+// placed a limit.
+//
+// A LIMIT IS SUPERVISED. A context of this implementation, started with the
+// first limit, watches the limited units and ends one it sees over its limit,
+// at an interval of at most 500 ms (500 ms below half the limit, 200 ms below
+// four fifths, 100 ms above).
+//
+// NOT HARD, AND WHY. The kernel holds a set of programs to a ceiling through a
+// control group, and a program may make one only in a part of the hierarchy
+// that was delegated to it; whether a part was delegated is the manager's
+// record, not the kernel's, so an implementation that made groups wherever it
+// could write would make them where it was not entitled to --- on an ordinary
+// desktop the program's own slice is writable and is not delegated. And where
+// a group is delegated, a program inside it may give it children with a
+// ceiling only after moving itself out of it, which is the program's decision
+// to make and not an interface's. A program that holds a delegation and wants
+// the kernel's ceiling uses it directly (clause 1.1).
+namespace {
+
+okl_long read_small(const char* path, char* b, okl_long cap) {
+    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+                                 okl::o_rdonly | okl::o_cloexec, 0);
+    if (okl::failed(fd)) return -1;
+    okl_long n = 0;
+    while (n < cap - 1) {
+        const okl_long r = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(b + n), cap - 1 - n);
+        if (okl::interrupted(r)) continue;
+        if (r <= 0) break;
+        n += r;
+    }
+    okl::sys(okl::nr_close, fd);
+    b[n] = 0;
+    return n;
+}
+
+okl_uptr length_of(const char* s) { okl_uptr n = 0; while (s[n]) ++n; return n; }
+
+// The number after `key' in a text of lines `key: number unit', or false.
+bool field_value(const char* b, okl_long n, const char* key, okl_u64& out) {
+    const okl_uptr k = length_of(key);
+    for (okl_long i = 0; i + static_cast<okl_long>(k) <= n; ++i) {
+        if ((i == 0 || b[i - 1] == '\n') && same_prefix(b + i, key, k)) {
+            okl_long j = i + static_cast<okl_long>(k);
+            while (j < n && (b[j] == ' ' || b[j] == '\t' || b[j] == ':')) ++j;
+            okl_u64 v = 0; bool any = false;
+            while (j < n && b[j] >= '0' && b[j] <= '9') { v = v * 10 + static_cast<okl_u64>(b[j] - '0'); ++j; any = true; }
+            out = v;
+            return any;
+        }
+    }
+    return false;
+}
+
+okl_u64 page_bytes() {
+    const okl_ulong p = okl::auxval(6 /* AT_PAGESZ */);
+    return p != 0 ? p : 4096;
+}
+
+// A running program's memory, from /proc/<pid>/status (pid 0: this one).
+bool resident(okl_long pid, okl_u64& now, okl_u64& peak) {
+    char path[40] = "/proc/";
+    char* o = path + 6;
+    if (pid == 0) { okl::copy(o, "self", 4); o += 4; }
+    else o = put_decimal(o, static_cast<okl_uptr>(pid));
+    okl::copy(o, "/status", 8);
+    char b[2048];
+    const okl_long n = read_small(path, b, sizeof b);
+    if (n <= 0) return false;
+    okl_u64 rss = 0, hwm = 0;
+    if (!field_value(b, n, "VmRSS", rss)) return false;
+    if (!field_value(b, n, "VmHWM", hwm)) hwm = rss;
+    now = rss * 1024; peak = (hwm < rss ? rss : hwm) * 1024;
+    return true;
+}
+
+// An ended program not yet collected: its record, read without collecting it.
+struct k_rusage { okl_long utime_s, utime_us, stime_s, stime_us, maxrss; okl_long rest[13]; };
+bool ended_usage(okl_long pid, k_rusage& ru) {
+    alignas(8) unsigned char info[128] = {};
+    const okl_long r = okl::sys(okl::nr_waitid, 1 /* P_PID */, pid, reinterpret_cast<okl_long>(info),
+                                4 | 1 | 0x01000000 /* WEXITED | WNOHANG | WNOWAIT */,
+                                reinterpret_cast<okl_long>(&ru));
+    if (okl::failed(r)) return false;
+    int si_pid = 0;
+    okl::copy(&si_pid, info + 16, sizeof si_pid);
+    return si_pid != 0;
+}
+
+// --- the units this program limited -----------------------------------------
+
+struct limited {
+    okl_long unit;          // the group's identifier; 0 for a free row
+    okl_u64  limit;         // bytes; 0 for none
+    int      ended;         // the supervisor ended it for its limit
+};
+constexpr int kLimited = 64;
+limited g_limited[kLimited];
+volatile int g_limited_lock = 0;
+void lock_limited()   { while (__atomic_exchange_n(&g_limited_lock, 1, __ATOMIC_ACQUIRE)) okl::sys(okl::nr_sched_yield); }
+void unlock_limited() { __atomic_store_n(&g_limited_lock, 0, __ATOMIC_RELEASE); }
+
+limited* row_of(okl_long unit) {
+    for (auto& r : g_limited) if (r.unit == unit) return &r;
+    return nullptr;
+}
+
+// --- the programs of a unit -----------------------------------------------------
+
+// Every program whose group is `unit', with its resident memory summed.
+// Returns how many there are.
+kal_u32 members_of(okl_long unit, okl_u64& memory) {
+    memory = 0;
+    kal_u32 count = 0;
+    const okl_long dir = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>("/proc"),
+                                  okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
+    if (okl::failed(dir)) return 0;
+    alignas(8) char buf[8192];
+    const okl_u64 page = page_bytes();
+    for (;;) {
+        const okl_long n = okl::sys(okl::nr_getdents64, dir, reinterpret_cast<okl_long>(buf), sizeof buf);
+        if (n <= 0) break;
+        for (okl_long at = 0; at < n;) {
+            const auto* d = reinterpret_cast<const okl::kdirent64*>(buf + at);
+            at += d->reclen;
+            const char* name = d->name;
+            if (name[0] < '1' || name[0] > '9') continue;
+            okl_long pid = 0;
+            for (const char* c = name; *c; ++c) pid = pid * 10 + (*c - '0');
+            char b[1024];
+            const okl_long len = read_stat(pid, b);
+            if (len <= 0) continue;
+            bool ok = false;
+            if (static_cast<okl_long>(stat_number(b, len, 5, ok)) != unit || !ok) continue;
+            bool rok = false;
+            const okl_u64 rss = stat_number(b, len, 24, rok);
+            if (rok) memory += rss * page;
+            ++count;
+        }
+    }
+    okl::sys(okl::nr_close, dir);
+    return count;
+}
+
+// --- the supervisor -------------------------------------------------------------
+
+int g_supervising = 0;
+
+void supervise(void*) {
+    for (;;) {
+        okl_u64 worst = 0;   // the largest use, in thousandths of its limit
+        bool any = false;
+        for (int i = 0; i < kLimited; ++i) {
+            lock_limited();
+            const limited r = g_limited[i];
+            unlock_limited();
+            if (r.unit == 0 || r.limit == 0 || r.ended) continue;
+            any = true;
+            okl_u64 memory = 0;
+            const kal_u32 n = members_of(r.unit, memory);
+            if (n == 0) continue;
+            if (memory > r.limit) {
+                // Marked before it is ended, so that a wait that returns
+                // because of the end already finds why.
+                lock_limited();
+                if (g_limited[i].unit == r.unit) g_limited[i].ended = 1;
+                unlock_limited();
+                okl::sys(okl::nr_kill, -r.unit, 9 /* SIGKILL */);
+                continue;
+            }
+            const okl_u64 share = memory * 1000 / r.limit;
+            if (share > worst) worst = share;
+        }
+        if (!any) {
+            __atomic_store_n(&g_supervising, 0, __ATOMIC_RELEASE);
+            // A limit placed between the last look and the store above found
+            // a supervisor still running and started none.
+            lock_limited();
+            bool again = false;
+            for (const auto& r : g_limited) if (r.unit && r.limit && !r.ended) again = true;
+            unlock_limited();
+            if (!again || __atomic_exchange_n(&g_supervising, 1, __ATOMIC_ACQ_REL)) return;
+            continue;
+        }
+        const okl_i64 ms = worst < 500 ? 500 : worst < 800 ? 200 : 100;
+        okl::ktimespec ts{ 0, ms * 1000000 };
+        okl::sys(okl::nr_nanosleep, reinterpret_cast<okl_long>(&ts), 0);
+    }
+}
+
+// Why a program that ended on SIGKILL ended: its unit's limit, where the
+// supervisor ended the unit for it.
+bool ended_by_limit(okl_long pid) {
+    char b[1024];
+    const okl_long len = read_stat(pid, b);
+    if (len <= 0) return false;
+    bool ok = false;
+    const okl_long unit = static_cast<okl_long>(stat_number(b, len, 5, ok));
+    if (!ok || unit <= 0) return false;
+    lock_limited();
+    const limited* r = row_of(unit);
+    const limited copy = r ? *r : limited{};
+    unlock_limited();
+    return copy.unit != 0 && copy.ended != 0;
+}
+
+}  // namespace
+
+extern "C++" {
+namespace okl {
+void job_forget(okl_long unit) {
+    lock_limited();
+    if (limited* r = row_of(unit)) *r = limited{};
+    unlock_limited();
+}
+
+bool child_memory(okl_long pid, bool ended, okl_u64& now, okl_u64& peak) {
+    if (!ended) return resident(pid, now, peak);
+    k_rusage ru{};
+    if (!ended_usage(pid, ru)) return false;
+    now = 0;
+    peak = static_cast<okl_u64>(ru.maxrss) * 1024;
+    return true;
+}
+
+// How a started program ended, read without collecting it; `block' waits for
+// it. Shared with openkal.timeout.
+int child_outcome(okl_long pid, bool block, int* status, int* terminated, bool& ended) {
+    alignas(8) unsigned char info[128] = {};
+    okl_long r;
+    do r = okl::sys(okl::nr_waitid, 1 /* P_PID */, pid, reinterpret_cast<okl_long>(info),
+                    4 | 0x01000000 | (block ? 0 : 1) /* WEXITED | WNOWAIT [| WNOHANG] */, 0);
+    while (okl::interrupted(r));
+    ended = false;
+    if (okl::failed(r)) return okl::translate(r);
+    int si_pid = 0, si_code = 0, si_status = 0;
+    okl::copy(&si_code, info + 8, sizeof si_code);
+    okl::copy(&si_pid, info + 16, sizeof si_pid);
+    okl::copy(&si_status, info + 24, sizeof si_status);
+    if (si_pid == 0) return kal_ok;          // not yet
+    ended = true;
+    if (si_code == 1 /* CLD_EXITED */) {
+        if (status) *status = si_status & 0xff;
+        if (terminated) *terminated = 0;
+    } else {
+        if (status) *status = si_status;
+        if (terminated)
+            *terminated = (si_status == 9 && ended_by_limit(pid)) ? KAL_TERMINATED_LIMIT : 1;
+    }
+    return kal_ok;
+}
+}  // namespace okl
+}  // extern "C++"
+
+int kal_process_job_usage(kal_job j, kal_job_usage* out) {
+    if (out == nullptr || j.h == 0 || out->self_size < 8) return kal_err_invalid;
+    const okl_long unit = static_cast<okl_long>(j.h);
+    kal_job_usage v{};
+    v.self_size = out->self_size;
+    okl_u64 memory = 0;
+    v.members = members_of(unit, memory);
+    if (v.members == 0) return kal_err_invalid;
+    v.memory_bytes = memory;
+    const kal_u32 n = out->self_size < sizeof v ? out->self_size : static_cast<kal_u32>(sizeof v);
+    okl::copy(reinterpret_cast<char*>(out), reinterpret_cast<const char*>(&v), n);
+    return kal_ok;
+}
+
+int kal_process_job_limit(kal_job j, kal_uintptr kind, kal_u64 value) {
+    if (kind != KAL_JOB_LIMIT_MEMORY) return kal_err_invalid;
+    if (j.h == 0) return kal_err_invalid;
+    const okl_long unit = static_cast<okl_long>(j.h);
+
+    lock_limited();
+    limited* r = row_of(unit);
+    if (r == nullptr && value != 0) r = row_of(0);
+    if (r == nullptr) { unlock_limited(); return value == 0 ? kal_ok : kal_err_no_memory; }
+    if (r->unit == 0) *r = limited{ unit, 0, 0 };
+    r->limit = value;
+    unlock_limited();
+
+    if (value != 0 && !__atomic_exchange_n(&g_supervising, 1, __ATOMIC_ACQ_REL)) {
+        kal_task t{};
+        if (kal_task_start(&supervise, nullptr, &t) != kal_ok) {
+            __atomic_store_n(&g_supervising, 0, __ATOMIC_RELEASE);
+            return kal_err_no_memory;
+        }
+    }
+    return kal_ok;
 }
 
 }

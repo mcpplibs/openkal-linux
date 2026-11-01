@@ -2,6 +2,9 @@
 #include "handle.h"
 #include "endpoint.h"
 #include <openkal/timeout.h>
+#include <openkal/time.h>
+
+namespace okl { int child_outcome(okl_long pid, bool block, int* status, int* terminated, bool& ended); }
 
 // openkal.timeout upon ppoll(2) and wait4(2).
 //
@@ -126,41 +129,39 @@ kal_intptr kal_timeout_recv_from(kal_datagram d, void* buf, kal_uintptr len,
 
 int kal_timeout_wait_process(kal_process p, kal_u64 ns, int* status, int* terminated) {
     if (p.h == 0) return kal_err_invalid;
+    const okl_long pid = static_cast<okl_long>(p.h & 0xffffffffu);
 
-    // WNOHANG AND A POLLING LOOP, BECAUSE THE KERNEL HAS NO BOUNDED WAIT FOR A
-    // CHILD. wait4 either blocks or does not wait at all; there is no timespec.
-    //
-    // The alternative is a signal handler for SIGCHLD, which this implementation
-    // does not have and would not want: a handler is process-wide state, and an
-    // implementation that installed one would take a facility away from the
-    // program above it. The loop is what the environment permits, and the
-    // interval is bounded below by the granularity this interface reports so
-    // that the polling cost is stated rather than hidden.
-    constexpr okl_u64 interval_ns = 1000000ull;   // one millisecond
+    // THE PROGRAM'S OWN DESCRIPTOR, WHERE THE KERNEL GIVES ONE (5.3 and later,
+    // openkal-linux 0.21): it becomes readable when the program ends, so the
+    // wait is the kernel's own bounded wait upon it rather than a loop. Where
+    // there is none, the loop below remains --- `wait4' either blocks or does
+    // not wait at all, and a handler for SIGCHLD would take a facility away
+    // from the program above. Either way the program is not collected here;
+    // `kal_process_close' collects it, as after `kal_process_wait'.
+    const okl_long fd = okl::sys(okl::nr_pidfd_open, pid, 0);
+    constexpr okl_u64 interval_ns = 1000000ull;   // one millisecond, without a descriptor
     okl_u64 waited = 0;
-
     for (;;) {
-        int st = 0;
-        const okl_long r = okl::sys(okl::nr_wait4, static_cast<okl_long>(p.h),
-                                    reinterpret_cast<okl_long>(&st),
-                                    1 /* WNOHANG */, 0);
-        if (okl::interrupted(r)) continue;
-        if (okl::failed(r)) return okl::translate(r);
-
-        if (r != 0) {
-            const int signalled = st & 0x7f;
-            if (signalled == 0) {
-                if (status) *status = (st >> 8) & 0xff;
-                if (terminated) *terminated = 0;
-            } else {
-                if (status) *status = signalled;
-                if (terminated) *terminated = 1;
-            }
-            return kal_ok;
+        bool ended = false;
+        const int e = okl::child_outcome(pid, false, status, terminated, ended);
+        if (e != kal_ok || ended) {
+            if (!okl::failed(fd)) okl::sys(okl::nr_close, fd);
+            return e;
         }
-
-        if (ns != 0 && waited >= ns) return kal_err_again;
-
+        if (ns != 0 && waited >= ns) {
+            if (!okl::failed(fd)) okl::sys(okl::nr_close, fd);
+            return kal_err_again;
+        }
+        if (!okl::failed(fd)) {
+            const okl_u64 left = ns == 0 ? 0 : ns - waited;
+            struct { int fd; short events, revents; } pfd{ static_cast<int>(fd), 1 /* POLLIN */, 0 };
+            okl::ktimespec ts{ static_cast<okl_i64>(left / 1000000000u), static_cast<okl_i64>(left % 1000000000u) };
+            const okl_u64 t0 = kal_time_monotonic();
+            okl::sys(okl::nr_ppoll, reinterpret_cast<okl_long>(&pfd), 1,
+                     ns == 0 ? 0 : reinterpret_cast<okl_long>(&ts), 0, 0);
+            waited += kal_time_monotonic() - t0;
+            continue;
+        }
         okl::ktimespec ts{ 0, static_cast<okl_i64>(interval_ns) };
         okl::sys(okl::nr_nanosleep, reinterpret_cast<okl_long>(&ts), 0);
         waited += interval_ns;

@@ -250,7 +250,19 @@ jobs:
           # examined here, where a build of the modules exists: the test names
           # every entity SURFACE.txt lists, so a name the modules do not export
           # fails to compile and the diagnostic names it.
-          list="$(grep -vE '^[[:space:]]*(#|$)' .spec/SURFACE.txt | sort -u)"
+          # THE NAMES OF THE INTERFACES THIS IMPLEMENTATION PROVIDES, not every
+          # name: since openkal 0.20 SURFACE.txt carries `openkal.prof' and
+          # `openkal.debug', which are a loader's (clause 12.3), and an interface
+          # an implementation does not provide is absent by clause 6.1. The set is
+          # the manifest's `provides-interfaces', which the step above checks
+          # against the artefact, and the self-description every implementation
+          # exports.
+          provided="$(sed -n '/^provides-interfaces/,/^]/p' mcpp.toml | grep -oE 'openkal\.[a-z]+'; echo openkal.version)"
+          list="$(awk -v keep="$provided" '
+              BEGIN { n = split(keep, k, "\n"); for (i = 1; i <= n; i++) want[k[i]] = 1 }
+              /^# openkal\.[a-z]+( |$)/ { group = $2; next }
+              /^[[:space:]]*(#|$)/ { next }
+              group in want { print }' .spec/SURFACE.txt | sort -u)"
           {
             # THE MODULE LIST IS DERIVED, NOT WRITTEN OUT.
             #
