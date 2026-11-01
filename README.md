@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.19.0"
+openkal = "0.20.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.20.0"
+openkal-linux = "0.21.0"
 ```
 
 ## Why it does not use a C library
@@ -42,7 +42,8 @@ second and third.
 
 ## Interfaces provided
 
-All eight. `tools/check-surface.sh --complete` in the specification package
+Every interface of `SURFACE.txt` except `openkal.prof` and `openkal.debug`, which
+are a loader's (clause 12.3). `tools/check-surface.sh --complete` in the specification package
 compares the exported names against `SURFACE.txt`.
 
 ## The stack a started context is given
@@ -101,22 +102,52 @@ A program that carries a runtime of its own answers from that runtime instead
 (`pthread_getattr_np`), because in that arrangement the runtime is what owns the
 stacks and is what a program above openkal would ask for itself.
 
-## A defect this version repairs
+## What 0.21 adds (openkal 0.20)
 
-0.16.0 added the storage this implementation keeps for the region a context
-stands on, and that storage made a latent defect of `src/tls.h` visible: the
-thread-local segment's alignment was clamped up to sixteen where the block's
-SIZE is computed, and the size has to be the one the linker measured every
-variable's offset against. On a segment stating `p_align = 8, p_memsz = 56` the
-linker laid the variables out at `tp - 56` while the region was built 64 bytes
-deep, so the image of the program's thread-local storage sat eight bytes below
-the variables that name it. A program whose thread-local variables are
-initialised then reads another variable's bytes, and a C++ program's
-`thread_local` object can find its guard byte non-zero and never be constructed
---- which is how openkal-llvm-runtime's own probe reported it.
+**Transfers at an offset.** `kal_fs_read_at` and `kal_fs_write_at` are the
+kernel's `pread64` and `pwrite64`: one call each, and the file's position is
+neither used nor moved. A write at an offset to a file opened for appending lands
+at the end, which is this kernel's answer and one the specification names.
 
-The clamp now applies to the ALLOCATION, which wants sixteen, and not to the
-size, which is the linker's.
+**Regions.** `openkal.region` is provided. With the kernel's default treatment of
+memory (`vm.overcommit_memory` 0 or 1) a reservation is a mapping usable at once
+(`MAP_NORESERVE`), `kal_region_commit` makes no call, returning the backing is
+`madvise(MADV_DONTNEED)` and discarding is `madvise(MADV_FREE)`;
+`KAL_REGION_PROP_OVERCOMMIT` is claimed. Where the kernel charges memory when it
+is mapped (`vm.overcommit_memory` 2), a reservation is inaccessible and uncharged,
+backing is `mprotect`, and returning it is a fresh inaccessible mapping over the
+part; the property is not claimed. The mode is read once from /proc.
+
+**The clock without a system call.** `kal_time_monotonic` and `kal_time_wall`
+call the `clock_gettime` the kernel places in every program (the vDSO, found
+through `AT_SYSINFO_EHDR`), and the system call remains where there is none.
+
+**What a program and a unit use.** `kal_process_info` reports `KAL_PINFO_MEMORY`:
+`VmRSS` and `VmHWM` of /proc/<pid>/status for a running program, and for a
+started program that has ended its peak from the record the kernel keeps until it
+is collected. `kal_process_wait` therefore waits without collecting
+(`waitid(WNOWAIT)`) and `kal_process_close` collects: a caller that waits and
+never releases the handle leaves the program in the kernel's table until it ends
+itself, which the handle's ownership (clause 6.7) already asked it not to do.
+`kal_timeout_wait_process` waits on the program's descriptor (`pidfd_open`, 5.3
+and later) instead of polling.
+
+A unit is a process group, and its use is the sum over the entries of /proc
+whose group is the unit's --- every program in it, including those its members
+started; one read per program on the machine, made only when a caller asks.
+`KAL_PROCESS_PROP_JOB_USAGE` is claimed.
+
+**A limit on a unit is supervised.** `kal_process_job_limit` starts, with the
+first limit, a context that observes the limited units and ends a unit with
+SIGKILL when it sees its use over the limit: every 500 ms while the use is below
+half the limit, 200 ms below four fifths, 100 ms above. The longest interval is
+therefore 500 ms. A program a limit ended is reported by `kal_process_wait` with
+`KAL_TERMINATED_LIMIT`. `KAL_PROCESS_PROP_JOB_LIMIT_SUPERVISED` is claimed and
+`KAL_PROCESS_PROP_JOB_LIMIT_HARD` is not: the kernel's own ceiling is a control
+group, a program may make one only where the hierarchy was delegated to it, and
+whether it was is the service manager's record rather than the kernel's --- on an
+ordinary desktop the program's own slice is writable and is not delegated. A
+program that holds a delegation and wants the kernel's ceiling uses it directly.
 
 ## Conformance
 

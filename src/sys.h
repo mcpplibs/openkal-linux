@@ -129,6 +129,9 @@ enum : okl_long {
     // number, how one ended, and the request reproduced.
     nr_renameat2 = 316, nr_pidfd_open = 434, nr_waitid = 247,
     nr_rt_sigprocmask = 14,
+    // openkal 0.20: transfers at an offset, a range's backing returned, and
+    // whether a file may be written by this program (a control group's).
+    nr_pread64 = 17, nr_pwrite64 = 18, nr_madvise = 28, nr_faccessat = 269,
 };
 
 #elif defined(__aarch64__)
@@ -225,6 +228,8 @@ enum : okl_long {
     // openkal 0.17, as on the other architecture.
     nr_renameat2 = 276, nr_pidfd_open = 434, nr_waitid = 95,
     nr_rt_sigprocmask = 135,
+    // openkal 0.20, as on the other architecture.
+    nr_pread64 = 67, nr_pwrite64 = 68, nr_madvise = 233, nr_faccessat = 48,
 };
 
 #else
@@ -324,6 +329,8 @@ enum : okl_long {
     at_fdcwd = -100, at_removedir = 0x200, at_symlink_nofollow = 0x100,
     prot_read = 1, prot_write = 2, prot_exec = 4, prot_none = 0,
     map_shared = 1, map_private = 2, map_anonymous = 0x20, map_stack = 0x20000,
+    map_fixed = 0x10, map_noreserve = 0x4000,
+    madv_dontneed = 4, madv_free = 8,
     ms_async = 1,
     clock_monotonic = 1, clock_realtime = 0,
     futex_wait = 0, futex_wake = 1, futex_private = 128,

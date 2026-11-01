@@ -487,6 +487,43 @@ int kal_fs_truncate(kal_file f, kal_u64 size) {
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
+// TRANSFERS AT AN OFFSET (openkal 0.20): the kernel's own `pread64' and
+// `pwrite64', which neither use nor move the position. A write at an offset to
+// a file opened for appending lands at the end, which is this kernel's answer
+// and one the specification names. The write is completed as a stream's is,
+// and an interruption is retried rather than reported (clause 7.5).
+kal_intptr kal_fs_read_at(kal_file f, void* buf, kal_uintptr len, kal_u64 offset) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0) return -kal_err_invalid;
+    for (;;) {
+        const okl_long r = okl::sys(okl::nr_pread64, fd, reinterpret_cast<okl_long>(buf),
+                                    static_cast<okl_long>(len), static_cast<okl_long>(offset));
+        if (okl::interrupted(r)) continue;
+        if (okl::failed(r)) return -okl::translate(r);
+        return static_cast<kal_intptr>(r);
+    }
+}
+
+kal_intptr kal_fs_write_at(kal_file f, const void* buf, kal_uintptr len, kal_u64 offset) {
+    const int fd = okl::unpack(f.h);
+    if (fd < 0) return -kal_err_invalid;
+    const auto* p = static_cast<const unsigned char*>(buf);
+    kal_uintptr done = 0;
+    while (done < len) {
+        const okl_long r = okl::sys(okl::nr_pwrite64, fd, reinterpret_cast<okl_long>(p + done),
+                                    static_cast<okl_long>(len - done),
+                                    static_cast<okl_long>(offset + done));
+        if (okl::interrupted(r)) continue;
+        if (okl::failed(r)) {
+            if (done != 0) return static_cast<kal_intptr>(done);
+            return -okl::translate(r);
+        }
+        if (r == 0) break;
+        done += static_cast<kal_uintptr>(r);
+    }
+    return static_cast<kal_intptr>(done);
+}
+
 int kal_fs_info(kal_dir base, const char* name, kal_uintptr len,
                 kal_uintptr flags, kal_u32 wanted, kal_node_info* out) {
     const int b = okl::unpack(base.h);
