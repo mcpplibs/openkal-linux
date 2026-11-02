@@ -228,23 +228,49 @@ kal_uintptr volume_props_of(int fd) { return volume_props(fd); }
 // A volume's format does not change under a device number while it is mounted,
 // so the answer is kept by the device the kernel reports for the node; a slot
 // a later device needs is taken over (eight are kept).
+//
+// READ WITHOUT A LOCK (0.22): the slots change only when a ninth device is
+// asked about, so a reader takes the sequence before and after reading them and
+// reads again if a writer was between; writers take the lock. The lock taken on
+// every enquiry was a fifth of what an enquiry cost beyond the kernel's own.
 struct volume_answer { okl_u64 dev; kal_uintptr props; bool known; };
 volume_answer g_volumes[8];
 unsigned g_volume_next = 0;
 volatile int g_volume_lock = 0;
+unsigned g_volume_sequence = 0;   // odd while a writer changes a slot
+
+bool volume_known(okl_u64 dev, kal_uintptr& props) {
+    for (;;) {
+        const unsigned before = __atomic_load_n(&g_volume_sequence, __ATOMIC_ACQUIRE);
+        if (before & 1u) { okl::sys(okl::nr_sched_yield); continue; }
+        bool found = false;
+        kal_uintptr p = 0;
+        for (auto const& v : g_volumes)
+            if (__atomic_load_n(&v.known, __ATOMIC_RELAXED) && __atomic_load_n(&v.dev, __ATOMIC_RELAXED) == dev) {
+                p = __atomic_load_n(&v.props, __ATOMIC_RELAXED);
+                found = true;
+                break;
+            }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g_volume_sequence, __ATOMIC_RELAXED) != before) continue;
+        props = p;
+        return found;
+    }
+}
 
 kal_uintptr volume_props_on(okl_u64 dev, int fd) {
+    kal_uintptr props = 0;
+    if (volume_known(dev, props)) return props;
+    props = volume_props(fd);
     while (__atomic_exchange_n(&g_volume_lock, 1, __ATOMIC_ACQUIRE)) okl::sys(okl::nr_sched_yield);
-    for (auto const& v : g_volumes)
-        if (v.known && v.dev == dev) {
-            const kal_uintptr props = v.props;
-            __atomic_store_n(&g_volume_lock, 0, __ATOMIC_RELEASE);
-            return props;
-        }
-    __atomic_store_n(&g_volume_lock, 0, __ATOMIC_RELEASE);
-    const kal_uintptr props = volume_props(fd);
-    while (__atomic_exchange_n(&g_volume_lock, 1, __ATOMIC_ACQUIRE)) okl::sys(okl::nr_sched_yield);
-    g_volumes[g_volume_next++ % 8] = volume_answer{ dev, props, true };
+    __atomic_store_n(&g_volume_sequence, g_volume_sequence + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    volume_answer& slot = g_volumes[g_volume_next++ % 8];
+    __atomic_store_n(&slot.known, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot.dev, dev, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot.props, props, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot.known, true, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_volume_sequence, g_volume_sequence + 1, __ATOMIC_RELEASE);
     __atomic_store_n(&g_volume_lock, 0, __ATOMIC_RELEASE);
     return props;
 }
@@ -293,8 +319,8 @@ void fill_info(const okl::kstat& st, kal_u32 wanted, kal_node_info* out,
         v.executable = (st.mode & 0111u) != 0 ? 1 : 0;
     }
 
-    const kal_u32 n = self < sizeof v ? self : (kal_u32)sizeof v;
-    okl::copy(reinterpret_cast<char*>(out), reinterpret_cast<const char*>(&v), n);
+    if (self >= sizeof v) { *out = v; out->self_size = self; return; }
+    okl::copy(reinterpret_cast<char*>(out), reinterpret_cast<const char*>(&v), self);
 }
 
 // A node that refers to nothing, in the same shape.
@@ -453,8 +479,8 @@ int kal_fs_open_dir(kal_dir base, const char* name, kal_uintptr len, kal_dir* ou
 int kal_fs_open(kal_dir base, const char* name, kal_uintptr len,
                 kal_uintptr flags, kal_file* out) {
     const int b = okl::unpack(base.h);
-    if (b < 0 || out == nullptr || !okl::acceptable(name, len)) return kal_err_invalid;
-    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    if (b < 0 || out == nullptr) return kal_err_invalid;
+    okl::accepted_name t(name, len); if (!t.ok) return kal_err_invalid;
 
     const bool r = (flags & KAL_OPEN_READ)  != 0;
     const bool w = (flags & KAL_OPEN_WRITE) != 0;
@@ -556,8 +582,8 @@ kal_intptr kal_fs_write_at(kal_file f, const void* buf, kal_uintptr len, kal_u64
 int kal_fs_info(kal_dir base, const char* name, kal_uintptr len,
                 kal_uintptr flags, kal_u32 wanted, kal_node_info* out) {
     const int b = okl::unpack(base.h);
-    if (b < 0 || !info_ok(out) || !okl::acceptable(name, len)) return kal_err_invalid;
-    okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    if (b < 0 || !info_ok(out)) return kal_err_invalid;
+    okl::accepted_name t(name, len); if (!t.ok) return kal_err_invalid;
     okl::kstat st{};
     // RESOLVES BY DEFAULT, SO THAT ASKING AND OPENING ANSWER THE SAME QUESTION.
     //

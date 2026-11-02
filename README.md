@@ -122,6 +122,12 @@ the page tables of the whole program and made each page it wrote afterwards faul
 again: 1.4 ms in the kernel and about 1 900 faults for each worker a language
 server started.
 
+**An enquiry and an open read the name once.** `kal_fs_info` and `kal_fs_open`
+check the name and terminate it for the kernel in one pass, the volume each
+enquiry asks about is read without a lock (a sequence read before and after the
+slots), and the answer is written straight into the caller's structure: what an
+enquiry costs beyond the kernel's own fell from 28 ns to 19 ns.
+
 **A chunk of `kal_alloc` is carved as it is used.** A free list threaded through
 each 1 MiB chunk when it was mapped made the whole chunk resident; six classes in
 use made 6 MiB resident in every program. A block is now carved when it is
