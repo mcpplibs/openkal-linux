@@ -185,7 +185,8 @@ int kal_exec_map_part(void* region, kal_uintptr offset, kal_uintptr size, kal_fi
     const int fd = okl::unpack(f.h);
     if (region == nullptr || size == 0 || fd < 0 || (offset & (g - 1)) != 0 || (size & (g - 1)) != 0
         || (reinterpret_cast<okl_uptr>(region) & (g - 1)) != 0 || at % KAL_MAP_ALIGNMENT != 0
-        || (how & ~(KAL_EXEC_MAP_EXECUTE | KAL_EXEC_MAP_PREFETCH | KAL_EXEC_MAP_BTI)) != 0)
+        || (how & ~(KAL_EXEC_MAP_EXECUTE | KAL_EXEC_MAP_PREFETCH | KAL_EXEC_MAP_BTI | KAL_EXEC_MAP_WRITE)) != 0
+        || ((how & KAL_EXEC_MAP_WRITE) && (how & KAL_EXEC_MAP_EXECUTE)))
         return kal_err_invalid;
     okl::kstat st{};
     const okl_long s = okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&st));
@@ -198,7 +199,10 @@ int kal_exec_map_part(void* region, kal_uintptr offset, kal_uintptr size, kal_fi
     // own on its first touch. BRANCH TARGETS: PROT_BTI, where the processor
     // holds them.
     const bool bti = (how & KAL_EXEC_MAP_BTI) && (how & KAL_EXEC_MAP_EXECUTE) && branch_targets();
+    // WRITTEN PRIVATELY (0.23): the mapping is private already, so a page the
+    // program writes is its own copy and the file is not changed.
     const okl_long prot = okl::prot_read | ((how & KAL_EXEC_MAP_EXECUTE) ? okl::prot_exec : 0)
+                        | ((how & KAL_EXEC_MAP_WRITE) ? okl::prot_write : 0)
                         | (bti ? 0x10 /* PROT_BTI */ : 0);
     const okl_long populate = (how & KAL_EXEC_MAP_PREFETCH) ? 0x8000 /* MAP_POPULATE */ : 0;
     const okl_long r = okl::sys(okl::nr_mmap,
