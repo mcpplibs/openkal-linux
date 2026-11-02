@@ -51,6 +51,26 @@ void* kal_exec_alloc(kal_uintptr size) {
     return reinterpret_cast<void*>(r);
 }
 
+// AT AN ADDRESS (0.23): MAP_FIXED_NOREPLACE, which refuses rather than replaces
+// what is there. A kernel before 4.17 does not know the flag and reads the
+// address as a hint, so the answer is compared and a mapping placed elsewhere
+// released: the address is either given or refused, never approximated.
+void* kal_exec_alloc_at(void* at, kal_uintptr size) {
+    const okl_uptr where = reinterpret_cast<okl_uptr>(at);
+    if (size == 0 || where == 0 || (where & (page() - 1)) != 0) return nullptr;
+    const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), page());
+    const okl_long r = okl::sys(okl::nr_mmap, static_cast<okl_long>(where), static_cast<okl_long>(bytes),
+                                okl::prot_read | okl::prot_write,
+                                okl::map_private | okl::map_anonymous | 0x100000 /* MAP_FIXED_NOREPLACE */,
+                                -1, 0);
+    if (okl::failed(r)) return nullptr;
+    if (static_cast<okl_uptr>(r) != where) {
+        okl::sys(okl::nr_munmap, r, static_cast<okl_long>(bytes));
+        return nullptr;
+    }
+    return at;
+}
+
 int kal_exec_publish(void* p, kal_uintptr size) {
     if (p == nullptr || size == 0) return kal_err_invalid;
     const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), page());
@@ -163,7 +183,7 @@ void kal_exec_free(void* p, kal_uintptr size) {
 kal_uintptr kal_exec_props(void) {
     // Executable memory is available to every artifact on this kernel: nothing
     // here is granted only to a program produced in a particular way.
-    return KAL_EXEC_PROP_REPUBLISH | KAL_EXEC_PROP_AVAILABLE | KAL_EXEC_PROP_FILE;
+    return KAL_EXEC_PROP_REPUBLISH | KAL_EXEC_PROP_AVAILABLE | KAL_EXEC_PROP_FILE | KAL_EXEC_PROP_PLACE;
 }
 
 }  // extern "C"

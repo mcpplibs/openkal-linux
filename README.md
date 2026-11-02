@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.22.0"
+openkal = "0.23.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.23.0"
+openkal-linux = "0.24.0"
 ```
 
 ## Why it does not use a C library
@@ -101,6 +101,13 @@ plus 256 pages.
 A program that carries a runtime of its own answers from that runtime instead
 (`pthread_getattr_np`), because in that arrangement the runtime is what owns the
 stacks and is what a program above openkal would ask for itself.
+
+## What 0.24 adds (openkal 0.23)
+
+**A region at an address.** `kal_exec_alloc_at` maps the region with
+`MAP_FIXED_NOREPLACE`, which refuses rather than replaces what is there; a kernel
+before 4.17 reads the flag as a hint, so a mapping placed elsewhere is released
+and the request refused. `KAL_EXEC_PROP_PLACE` is claimed.
 
 ## What 0.23 adds (openkal 0.22)
 

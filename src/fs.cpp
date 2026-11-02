@@ -825,8 +825,24 @@ int kal_fs_list_next(kal_dir d, kal_uintptr* iter,
 // filesystem it mounts, and `renameat' within one directory is atomic by POSIX.
 // Case sensitivity and links are claimed only where the format is known to have
 // them.
+// WHETHER THE KERNEL NAMES A DESCRIPTOR (/proc/self/fd), which a name with
+// every link followed is read from (0.23). Asked once: /proc is mounted for the
+// process or it is not, whatever the volume.
+static bool descriptor_names() {
+    static int known = -1;
+    if (known < 0) {
+        char b[8];
+        known = okl::failed(okl::sys(okl::nr_readlinkat, okl::at_fdcwd,
+                                     reinterpret_cast<okl_long>("/proc/self/cwd"),
+                                     reinterpret_cast<okl_long>(b), static_cast<okl_long>(sizeof b))) ? 0 : 1;
+    }
+    return known == 1;
+}
+
 kal_uintptr kal_fs_props(kal_dir d) {
-    return volume_props(okl::unpack(d.h));
+    const int fd = okl::unpack(d.h);
+    if (fd < 0) return 0;
+    return volume_props(fd) | (descriptor_names() ? KAL_FS_PROP_RESOLVED_NAME : 0u);
 }
 
 // --- exclusion upon a range of a file --------------------------------------
@@ -936,6 +952,39 @@ int kal_fs_link_create(kal_dir base, const char* name, kal_uintptr len,
     const okl_long r = okl::sys(okl::nr_symlinkat, reinterpret_cast<okl_long>(tgt.buf),
                                 b, reinterpret_cast<okl_long>(n.buf));
     return okl::failed(r) ? okl::translate(r) : kal_ok;
+}
+
+// THE NAME WITH EVERY LINK FOLLOWED (0.23): the node opened for its path alone
+// (O_PATH, which needs no permission upon it and follows every link), and the
+// kernel's record of that descriptor's name read, as this system's own C
+// library answers `realpath' of an open file. Two calls and a close, where a
+// walk asks about every component of the name.
+kal_intptr kal_fs_resolved_name(kal_dir base, const char* name, kal_uintptr len,
+                                char* out, kal_uintptr cap) {
+    const int b = okl::unpack(base.h);
+    if (b < 0 || !okl::acceptable(name, len)) return -kal_err_invalid;
+    if (!descriptor_names()) return -kal_err_not_supported;
+    okl::terminated t(name, len); if (!t.ok) return -kal_err_invalid;
+    const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf),
+                                 okl::o_path | okl::o_cloexec, 0);
+    if (okl::failed(fd)) return -okl::translate(fd);
+    char link[32] = "/proc/self/fd/";
+    {
+        okl_uptr at = 14;
+        char digits[20]; int n = 0;
+        okl_ulong v = static_cast<okl_ulong>(fd);
+        do { digits[n++] = static_cast<char>('0' + v % 10); v /= 10; } while (v);
+        while (n) link[at++] = digits[--n];
+        link[at] = '\0';
+    }
+    char own[2 * okl::max_name + 2];
+    const okl_long r = okl::sys(okl::nr_readlinkat, okl::at_fdcwd, reinterpret_cast<okl_long>(link),
+                                reinterpret_cast<okl_long>(own), static_cast<okl_long>(sizeof own));
+    okl::sys(okl::nr_close, fd);
+    if (okl::failed(r)) return -okl::translate(r);
+    if (out != nullptr)
+        for (okl_long i = 0; i < r && static_cast<okl_uptr>(i) < cap; ++i) out[i] = own[i];
+    return static_cast<kal_intptr>(r);
 }
 
 kal_intptr kal_fs_link_read(kal_dir base, const char* name, kal_uintptr len,
