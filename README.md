@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.22.0"
+openkal = "0.23.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.23.0"
+openkal-linux = "0.24.0"
 ```
 
 ## Why it does not use a C library
@@ -101,6 +101,43 @@ plus 256 pages.
 A program that carries a runtime of its own answers from that runtime instead
 (`pthread_getattr_np`), because in that arrangement the runtime is what owns the
 stacks and is what a program above openkal would ask for itself.
+
+## What 0.24 adds (openkal 0.23)
+
+**A region at an address.** `kal_exec_alloc_at` maps the region with
+`MAP_FIXED_NOREPLACE`, which refuses rather than replaces what is there; a kernel
+before 4.17 reads the flag as a hint, so a mapping placed elsewhere is released
+and the request refused. `KAL_EXEC_PROP_PLACE` is claimed.
+
+**A part sealed, a part read in.** `kal_exec_seal_part` is `mprotect` to read
+only, and `mseal` for `KAL_EXEC_SEAL_FOREVER` where the kernel has it (6.10;
+`KAL_EXEC_PROP_SEAL_FOREVER` is claimed by asking it once). `KAL_EXEC_MAP_PREFETCH`
+is `MAP_POPULATE`; `KAL_EXEC_MAP_BTI` is `PROT_BTI` on arm64, claimed where the
+kernel accepts it.
+
+**A handle with less** (`kal_fs_dir_attenuate`): a table indexed by descriptor,
+consulted by every operation of `openkal.fs` that takes a directory and empty in
+a program that attenuates nothing. A read-only handle refuses every change; one
+that states nothing changes answers absence from a listing it has read, within
+a budget the resource preference sets; a recorded one appends `<kind><name>\0`
+to its record in batches, and `e\0` at `kal_exit` or the C library's
+destructors. A grant carries its rights in `KAL_GRANT_RIGHTS`, and its record
+as a descriptor after the grants.
+
+**Confinement** (`KAL_SPAWN_CONFINE`, `KAL_PROCESS_PROP_CONFINE`): Landlock, at
+the ABI version the kernel reports, set in the started image before it is
+replaced. The grants are the rules, by their rights; the program's own file,
+`/proc` and `/dev/null` are added, and `PR_SET_NO_NEW_PRIVS` is set.
+
+**Observation.** A fault is reported on an alternate stack from
+`/proc/self/maps` and the ELF symbol tables, and the program is then ended as
+the kernel ends it. Samples are `ITIMER_PROF` and `SIGPROF` into a ring a
+handler writes without a lock. Touches: a part recorded is made readable and
+not executable, and the handler makes each page executable again at its first
+execution and records it; a fault that is not a touch is reported, or passed
+to the program's own handler. `kal_process_info` reports minor and major
+faults (`getrusage`, `/proc/<pid>/stat`). `kal_memory_info` is `MemAvailable`
+within the cgroup's `memory.max`; economy sets `PR_SET_THP_DISABLE`.
 
 ## What 0.23 adds (openkal 0.22)
 

@@ -1,5 +1,6 @@
 #include "sys.h"
 #include "handle.h"
+#include "rights.h"
 #include <openkal/process.h>
 #include <openkal/memory.h>
 #include <openkal/task.h>
@@ -13,6 +14,8 @@ int child_outcome(okl_long pid, bool block, int* status, int* terminated, bool& 
 void job_forget(okl_long unit);
 bool child_memory(okl_long pid, bool ended, okl_u64& now, okl_u64& peak);
 bool child_cpu(okl_long pid, okl_u64& ns);
+int resource_preference();
+bool child_faults(okl_long pid, okl_u64& minor, okl_u64& major);
 }
 
 namespace {
@@ -22,6 +25,10 @@ bool same_prefix(const char* a, const char* b, okl_uptr n) {
     return true;
 }
 
+
+// The kernel's account of a program's use (getrusage, wait4): the times, the
+// peak, and in `rest' the counts that follow, the page faults at 3 and 4.
+struct k_rusage { okl_long utime_s, utime_us, stime_s, stime_us, maxrss; okl_long rest[13]; };
 
 constexpr okl_uptr kMaxEntries = 512;
 
@@ -35,6 +42,34 @@ bool names_preopens(const char* s, kal_uintptr n) {
         if (s[i] != kPreopens[i]) return false;
     return true;
 }
+
+// THE TWO VARIABLES 0.23 WRITES BESIDE IT: what each grant carries
+// (`KAL_GRANT_RIGHTS', read in fs.cpp) and the started program's resource
+// preference (`KAL_RESOURCES', read in env.cpp). A value of either the caller
+// supplied is left out where this start writes its own.
+constexpr char     kRights[]    = "KAL_GRANT_RIGHTS=";
+constexpr okl_uptr kRightsLen   = sizeof kRights - 1;
+constexpr char     kResources[] = "KAL_RESOURCES=";
+constexpr okl_uptr kResourcesLen = sizeof kResources - 1;
+
+bool starts_with(const char* s, kal_uintptr n, const char* key, okl_uptr klen) {
+    if (n < klen) return false;
+    for (okl_uptr i = 0; i < klen; ++i) if (s[i] != key[i]) return false;
+    return true;
+}
+
+// What one start conveys beside the grants' names.
+struct conveyance {
+    // KAL_GRANT_RIGHTS, without its number: `{;<index>,<flags>,<record>,<len>,<path>}'.
+    char     rights[4096];
+    okl_uptr rights_len = 0;
+    bool     any_rights = false;
+    // The descriptors of the records, placed after the grants.
+    okl_long record_src[16];
+    kal_uintptr records = 0;
+    // KAL_RESOURCES's value, or empty to leave what the caller's environment holds.
+    const char* resources = nullptr;
+};
 
 okl_uptr digits(okl_uptr v) {
     okl_uptr n = 1;
@@ -142,13 +177,19 @@ struct vector {
     // and asking for none (a count of zero) is a value with no entries.
     char*    pid_digits = nullptr;
 
+    char*    rights_pid_digits = nullptr;
+
     bool build_env(const char** items, const kal_uintptr* lens, kal_uintptr n,
-                   const kal_preopen* grants, kal_uintptr g) {
+                   const kal_preopen* grants, kal_uintptr g, const conveyance& c) {
         if (n > kMaxEntries) { ok = false; return false; }
+        auto left_out = [&](const char* s, kal_uintptr l) {
+            return names_preopens(s, l) || starts_with(s, l, kRights, kRightsLen)
+                || starts_with(s, l, kResources, kResourcesLen);
+        };
         kal_uintptr kept = 0;
         okl_uptr total = 0;
         for (kal_uintptr i = 0; i < n; ++i) {
-            if (names_preopens(items[i], lens[i])) continue;
+            if (left_out(items[i], lens[i])) continue;
             ++kept; total += lens[i] + 1;
         }
         okl_uptr extra = 0;
@@ -157,14 +198,18 @@ struct vector {
             for (kal_uintptr i = 0; i < g; ++i)
                 extra += 3 + digits(3 + i) + digits(grants[i].len) + grants[i].len;
         }
-        slots_bytes = (kept + (grants ? 1 : 0) + 1) * sizeof(char*);
+        if (c.any_rights) extra += kRightsLen + kPidDigits + c.rights_len + 1;
+        const okl_uptr res_len = c.resources ? okl::length(c.resources) : 0;
+        if (c.resources) extra += kResourcesLen + res_len + 1;
+        slots_bytes = (kept + (grants ? 1 : 0) + (c.any_rights ? 1 : 0) + (c.resources ? 1 : 0) + 1)
+                    * sizeof(char*);
         bytes_bytes = total + extra == 0 ? 1 : total + extra;
         slots = static_cast<char**>(kal_alloc(slots_bytes, alignof(char*)));
         bytes = static_cast<char*>(kal_alloc(bytes_bytes, 1));
         if (!slots || !bytes) { ok = false; return false; }
         okl_uptr at = 0, k = 0;
         for (kal_uintptr i = 0; i < n; ++i) {
-            if (names_preopens(items[i], lens[i])) continue;
+            if (left_out(items[i], lens[i])) continue;
             okl::copy(bytes + at, items[i], lens[i]);
             bytes[at + lens[i]] = '\0';
             slots[k++] = bytes + at;
@@ -183,6 +228,25 @@ struct vector {
                 okl::copy(o, grants[i].name, grants[i].len); o += grants[i].len;
             }
             *o = '\0';
+            at = static_cast<okl_uptr>(o + 1 - bytes);
+        }
+        if (c.any_rights) {
+            char* o = bytes + at;
+            slots[k++] = o;
+            okl::copy(o, kRights, kRightsLen); o += kRightsLen;
+            rights_pid_digits = o;
+            okl::fill(o, '0', kPidDigits); o += kPidDigits;
+            okl::copy(o, c.rights, c.rights_len); o += c.rights_len;
+            *o = '\0';
+            at = static_cast<okl_uptr>(o + 1 - bytes);
+        }
+        if (c.resources) {
+            char* o = bytes + at;
+            slots[k++] = o;
+            okl::copy(o, kResources, kResourcesLen); o += kResourcesLen;
+            okl::copy(o, c.resources, res_len); o += res_len;
+            *o = '\0';
+            at = static_cast<okl_uptr>(o + 1 - bytes);
         }
         slots[k] = nullptr;
         return true;
@@ -190,10 +254,14 @@ struct vector {
 
     // In the duplicate, which is the first point at which the number is known.
     void stamp(okl_long pid) const {
-        if (!pid_digits) return;
-        for (int i = static_cast<int>(kPidDigits) - 1; i >= 0; --i) {
-            pid_digits[i] = static_cast<char>('0' + pid % 10);
-            pid /= 10;
+        char* const where[2] = { pid_digits, rights_pid_digits };
+        for (char* d : where) {
+            if (!d) continue;
+            okl_long v = pid;
+            for (int i = static_cast<int>(kPidDigits) - 1; i >= 0; --i) {
+                d[i] = static_cast<char>('0' + v % 10);
+                v /= 10;
+            }
         }
     }
 
@@ -461,6 +529,71 @@ namespace {
 // this program's but the digits of its own number in its own environment,
 // which this program releases unread; the descriptors it moves are its own
 // copies.
+// --- confinement (0.23): Landlock --------------------------------------------
+//
+// THE KERNEL HOLDS A CONFINED PROGRAM TO ITS GRANTS, so that one that reaches
+// files without this interface --- or has been made to --- reaches nothing
+// else. A ruleset of the grants, each with what its rights allow; the program
+// itself, to execute it; /proc, which the program's own implementation reads
+// (`kal_fs_resolved_name'); and /dev/null, which a null position is.
+int landlock_abi() {
+    static int abi = -2;
+    if (abi == -2) {
+        const okl_long r = okl::sys(okl::nr_landlock_create_ruleset, 0, 0, 1 /* _VERSION */);
+        abi = okl::failed(r) ? 0 : static_cast<int>(r);
+    }
+    return abi;
+}
+
+okl_u64 handled_for(int abi) {
+    okl_u64 h = (okl_u64{1} << 13) - 1;      // EXECUTE ... MAKE_SYM (ABI 1)
+    if (abi >= 2) h |= okl_u64{1} << 13;     // REFER
+    if (abi >= 3) h |= okl_u64{1} << 14;     // TRUNCATE
+    if (abi >= 5) h |= okl_u64{1} << 15;     // IOCTL_DEV
+    return h;
+}
+
+// In the started image, after the grants are placed and before it is
+// replaced. Returns zero, or the kernel's negated reason.
+okl_long confine_to(const okl_u32* rights, kal_uintptr g, int base, const char* program) {
+    const int abi = landlock_abi();
+    if (abi < 1) return -okl::e_nosys;
+    struct { okl_u64 fs; } attr{ handled_for(abi) };
+    const okl_long rs = okl::sys(okl::nr_landlock_create_ruleset, reinterpret_cast<okl_long>(&attr),
+                                 sizeof attr, 0);
+    if (okl::failed(rs)) return rs;
+    struct __attribute__((packed)) { okl_u64 allowed; int parent; } rule{};
+    constexpr okl_u64 exec = 1, read_file = 4, read_dir = 8, write_file = 2;
+    auto add = [&](okl_u64 allowed, okl_long fd) {
+        rule.allowed = allowed & attr.fs;
+        rule.parent = static_cast<int>(fd);
+        return okl::sys(okl::nr_landlock_add_rule, rs, 1 /* PATH_BENEATH */, reinterpret_cast<okl_long>(&rule), 0);
+    };
+    okl_long why = 0;
+    for (kal_uintptr i = 0; i < g && why == 0; ++i) {
+        const bool ro = (rights[i] & okl::rights::read_only) != 0;
+        const okl_long r = add(ro ? (exec | read_file | read_dir) : attr.fs, static_cast<okl_long>(3 + i));
+        if (okl::failed(r)) why = r;
+    }
+    auto by_name = [&](okl_long at, const char* name, okl_u64 allowed) {
+        const okl_long fd = okl::sys(okl::nr_openat, at, reinterpret_cast<okl_long>(name),
+                                     okl::o_path | okl::o_cloexec, 0);
+        if (okl::failed(fd)) return;   // absent: nothing to allow
+        add(allowed, fd);
+        okl::sys(okl::nr_close, fd);
+    };
+    if (why == 0) {
+        by_name(base, program, exec | read_file);
+        by_name(okl::at_fdcwd, "/proc", read_file | read_dir);
+        by_name(okl::at_fdcwd, "/dev/null", read_file | write_file);
+        okl::sys(okl::nr_prctl, 38 /* PR_SET_NO_NEW_PRIVS */, 1, 0, 0, 0);
+        const okl_long r = okl::sys(okl::nr_landlock_restrict_self, rs, 0);
+        if (okl::failed(r)) why = r;
+    }
+    okl::sys(okl::nr_close, rs);
+    return why;
+}
+
 struct start_plan {
     const kal_spawn*       how;
     const okl::terminated* name;
@@ -474,6 +607,9 @@ struct start_plan {
     bool                   named, use_name, unit, bind;
     okl_long               join, mine;
     const unsigned long*   mask;
+    const conveyance*      carry;      // 0.23: the records placed after the grants
+    bool                   confine;    // 0.23: held to the grants by Landlock
+    const okl_u32*         grant_rights;
 };
 
 constexpr okl_uptr kStartStack = 64 * 1024;
@@ -523,7 +659,8 @@ int start_image(void* arg) {
     // including where the source happened to be the position itself ---
     // which `dup3' refuses, and which used to leave the copy marked to
     // close, so that the grant never arrived.
-    const okl_long top = static_cast<okl_long>(3 + how->grant_count);
+    const conveyance& carry = *plan.carry;
+    const okl_long top = static_cast<okl_long>(3 + how->grant_count + carry.records);
     auto lift = [&](okl_long fd) -> okl_long {
         const okl_long r = okl::sys(okl::nr_fcntl, fd, okl::f_dupfd_cloexec, top);
         if (okl::failed(r)) {
@@ -553,6 +690,8 @@ int start_image(void* arg) {
     const okl_long sou = (how->flags & KAL_SPAWN_NULL_OUT) ? device : ou != 0 ? lift(ou) : 0;
     const okl_long ser = (how->flags & KAL_SPAWN_NULL_ERR) ? device : er != 0 ? lift(er) : 0;
     for (kal_uintptr i = 0; i < how->grant_count; ++i) granted[i] = lift(granted[i]);
+    okl_long records[16];
+    for (kal_uintptr j = 0; j < carry.records; ++j) records[j] = lift(carry.record_src[j]);
     const okl_long base = lift(b);
     const okl_long work = lift(w);
 
@@ -561,6 +700,10 @@ int start_image(void* arg) {
     if (ser != 0) okl::sys(okl::nr_dup3, ser, 2, 0);
     for (kal_uintptr i = 0; i < how->grant_count; ++i)
         okl::sys(okl::nr_dup3, granted[i], static_cast<okl_long>(3 + i), 0);
+    // The records of recorded grants, after the grants (0.23); the started
+    // program learns where from KAL_GRANT_RIGHTS.
+    for (kal_uintptr j = 0; j < carry.records; ++j)
+        okl::sys(okl::nr_dup3, records[j], static_cast<okl_long>(3 + how->grant_count + j), 0);
 
     // What the CALLER itself inherited without the flag is not a handle it
     // granted. A program that starts others inside a sandbox passes every
@@ -612,6 +755,18 @@ int start_image(void* arg) {
         // above, the signal is already spent and this image would survive it.
         if (okl::sys(okl::nr_getppid) != mine)
             okl::sys(okl::nr_exit_group, 127);
+    }
+
+    // CONFINED (0.23): the kernel holds the program to its grants from its
+    // first instruction. A confinement that could not be made is a start that
+    // failed, reported as one: a caller that asked for it does not receive a
+    // program without it.
+    if (plan.confine) {
+        if (const okl_long why = confine_to(plan.grant_rights, how->grant_count, static_cast<int>(base), p.buf)) {
+            report.say(why);
+            okl::sys(okl::nr_exit_group, 127);
+            for (;;) { }
+        }
     }
 
     // The caller's mask, which the program is started with, once nothing of
@@ -751,7 +906,16 @@ int kal_process_spawn(const kal_spawn* how,
     // that outlives it --- which is the failure the flag exists to remove --- so an
     // unclaimed position is an error and not a thing to proceed without.
     constexpr kal_uintptr nulls = KAL_SPAWN_NULL_IN | KAL_SPAWN_NULL_OUT | KAL_SPAWN_NULL_ERR;
-    if (how->flags & ~(KAL_SPAWN_BOUND_LIFETIME | nulls)) return kal_err_not_supported;
+    constexpr kal_uintptr preferences = KAL_SPAWN_RESOURCES_BALANCED | KAL_SPAWN_RESOURCES_PERFORMANCE
+                                      | KAL_SPAWN_RESOURCES_ECONOMY;
+    if (how->flags & ~(KAL_SPAWN_BOUND_LIFETIME | nulls | preferences | KAL_SPAWN_CONFINE))
+        return kal_err_not_supported;
+    // ONE PREFERENCE (0.23); and a confinement this kernel cannot make is
+    // refused, not ignored.
+    const kal_uintptr preference = how->flags & preferences;
+    if ((preference & (preference - 1)) != 0) return kal_err_invalid;
+    const bool confine = (how->flags & KAL_SPAWN_CONFINE) != 0;
+    if (confine && landlock_abi() < 1) return kal_err_not_supported;
     // THE NULL DEVICE BESIDE A STREAM AT ONE POSITION is two answers to one
     // question (openkal 0.22, clause 7.15).
     if (streams != nullptr
@@ -788,9 +952,44 @@ int kal_process_spawn(const kal_spawn* how,
     const bool named = absolute_under(b, p.buf, path_len, resolved, sizeof resolved);
     const bool use_name = by_name() && named;
 
+    // WHAT EACH GRANT CARRIES, AND THE PREFERENCE (0.23).
+    conveyance carry;
+    okl_u32 grant_rights[max_grants] = {};
+    for (kal_uintptr i = 0; i < how->grant_count; ++i) {
+        okl_u32 flags = 0; int record = -1; const char* prefix = ""; okl_uptr plen = 0;
+        if (!okl::rights::conveyed(static_cast<int>(granted[i]), &flags, &record, &prefix, &plen)) continue;
+        grant_rights[i] = flags;
+        long dest = -1;
+        if (record >= 0 && carry.records < 16) {
+            dest = static_cast<long>(3 + how->grant_count + carry.records);
+            carry.record_src[carry.records++] = record;
+        }
+        char entry[64];
+        char* o = entry;
+        *o++ = ';'; o = put_decimal(o, i);
+        *o++ = ','; o = put_decimal(o, flags);
+        *o++ = ',';
+        if (dest < 0) { *o++ = '-'; *o++ = '1'; } else o = put_decimal(o, static_cast<okl_uptr>(dest));
+        *o++ = ','; o = put_decimal(o, plen);
+        *o++ = ',';
+        const okl_uptr head = static_cast<okl_uptr>(o - entry);
+        if (carry.rights_len + head + plen >= sizeof carry.rights) return kal_err_invalid;
+        okl::copy(carry.rights + carry.rights_len, entry, head); carry.rights_len += head;
+        okl::copy(carry.rights + carry.rights_len, prefix, plen); carry.rights_len += plen;
+        carry.any_rights = true;
+    }
+    {
+        const int own = okl::resource_preference();
+        const int asked = preference == KAL_SPAWN_RESOURCES_PERFORMANCE ? 1
+                        : preference == KAL_SPAWN_RESOURCES_ECONOMY ? 2
+                        : preference == KAL_SPAWN_RESOURCES_BALANCED ? 0 : own;
+        carry.resources = asked == 1 ? "performance" : asked == 2 ? "economy"
+                        : preference != 0 ? "balanced" : nullptr;
+    }
+
     vector args, envs;
     if (!args.build(argv, argv_lens, argc)) return kal_err_no_memory;
-    if (!envs.build_env(envp, envp_lens, envc, how->grants, how->grant_count))
+    if (!envs.build_env(envp, envp_lens, envc, how->grants, how->grant_count, carry))
         return kal_err_no_memory;
 
     const okl_long in = streams ? static_cast<okl_long>(streams->in.h)  : 0;
@@ -810,7 +1009,7 @@ int kal_process_spawn(const kal_spawn* how,
 
     // The bound is 3 + grant_count, because the placements below reach that far.
     exec_report report;
-    report.open(how->grant_count);
+    report.open(how->grant_count + carry.records);
 
     // THE STARTED IMAGE SHARES THIS PROGRAM'S MEMORY UNTIL IT IS REPLACED
     // (CLONE_VM | CLONE_VFORK), on a stack of its own, and this context waits
@@ -830,7 +1029,8 @@ int kal_process_spawn(const kal_spawn* how,
     okl::sys(okl::nr_rt_sigprocmask, 2 /* SIG_SETMASK */, reinterpret_cast<okl_long>(&every),
              reinterpret_cast<okl_long>(&caller_mask), sizeof every);
     const start_plan plan{ how, &p, granted, b, w, in, ou, er, &args, &envs, &report, resolved,
-                           named, use_name, unit, bind, join, mine, &caller_mask };
+                           named, use_name, unit, bind, join, mine, &caller_mask,
+                           &carry, confine, grant_rights };
     const okl_long stack = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(kStartStack),
                                     okl::prot_read | okl::prot_write,
                                     okl::map_private | okl::map_anonymous, -1, 0);
@@ -1337,12 +1537,37 @@ int kal_process_info(kal_process p, kal_u32 wanted, kal_program_info* out) {
     // MEMORY (openkal 0.20): resident now and at most, from the kernel's record;
     // of a started program that has ended, its peak from the record it keeps
     // until it is collected. Only where the structure has room for the fields.
-    if ((wanted & KAL_PINFO_MEMORY) && self >= sizeof v) {
+    // Where the caller's structure reaches the fields: one built for 0.22 ends
+    // with them, and is answered as it was.
+    constexpr kal_u32 memory_end = static_cast<kal_u32>(__builtin_offsetof(kal_program_info, memory_peak_bytes) + 8);
+    constexpr kal_u32 faults_end = static_cast<kal_u32>(__builtin_offsetof(kal_program_info, faults_major) + 8);
+    if ((wanted & KAL_PINFO_MEMORY) && self >= memory_end) {
         okl_u64 now = 0, peak = 0;
         const bool ok = me ? okl::child_memory(0, false, now, peak)
                      : handle_kind(p) == kind_child ? okl::child_memory(pid, ended, now, peak)
                      : (!ended && okl::child_memory(pid, false, now, peak));
         if (ok) { v.memory_bytes = now; v.memory_peak_bytes = peak; v.present |= KAL_PINFO_MEMORY; }
+    }
+    // PAGE FAULTS (0.23): this program's from the kernel's account of it, a
+    // running one's from its record in /proc, an ended one's from the record
+    // kept until it is collected.
+    if ((wanted & (KAL_PINFO_FAULTS | KAL_PINFO_MAJOR)) && self >= faults_end) {
+        okl_u64 minor = 0, major = 0;
+        bool ok = false;
+        if (me) {
+            k_rusage ru{};
+            ok = !okl::failed(okl::sys(okl::nr_getrusage, 0 /* RUSAGE_SELF */, reinterpret_cast<okl_long>(&ru)));
+            minor = static_cast<okl_u64>(ru.rest[3]); major = static_cast<okl_u64>(ru.rest[4]);
+        } else if (!ended) {
+            char b[1024];
+            const okl_long len = read_stat(pid, b);
+            bool a = false, c = false;
+            if (len > 0) { minor = stat_number(b, len, 10, a); major = stat_number(b, len, 12, c); }
+            ok = a && c;
+        } else if (handle_kind(p) == kind_child) {
+            ok = okl::child_faults(pid, minor, major);
+        }
+        if (ok) { v.faults_minor = minor; v.faults_major = major; v.present |= KAL_PINFO_FAULTS | KAL_PINFO_MAJOR; }
     }
     const kal_u32 n = self < sizeof v ? self : static_cast<kal_u32>(sizeof v);
     okl::copy(reinterpret_cast<char*>(out), reinterpret_cast<const char*>(&v), n);
@@ -1383,6 +1608,7 @@ kal_uintptr kal_process_props(void) {
          | KAL_PROCESS_PROP_JOB | KAL_PROCESS_PROP_JOB_USAGE
          | KAL_PROCESS_PROP_JOB_LIMIT_SUPERVISED
          | KAL_PROCESS_PROP_NULL_STREAMS
+         | (landlock_abi() >= 1 ? KAL_PROCESS_PROP_CONFINE : 0u)
          | (open_id_available() || stat_state(0) != 0 ? KAL_PROCESS_PROP_OPEN_ID : 0u)
          // AGREES WITH `kal_process_stop_requested', because the header
          // defines null there as the absence this position reports. Read and
@@ -1484,7 +1710,6 @@ bool resident(okl_long pid, okl_u64& now, okl_u64& peak) {
 }
 
 // An ended program not yet collected: its record, read without collecting it.
-struct k_rusage { okl_long utime_s, utime_us, stime_s, stime_us, maxrss; okl_long rest[13]; };
 bool ended_usage(okl_long pid, k_rusage& ru) {
     alignas(8) unsigned char info[128] = {};
     const okl_long r = okl::sys(okl::nr_waitid, 1 /* P_PID */, pid, reinterpret_cast<okl_long>(info),
@@ -1629,6 +1854,15 @@ bool child_memory(okl_long pid, bool ended, okl_u64& now, okl_u64& peak) {
     if (!ended_usage(pid, ru)) return false;
     now = 0;
     peak = static_cast<okl_u64>(ru.maxrss) * 1024;
+    return true;
+}
+
+// The page faults of an ended program not yet collected (0.23).
+bool child_faults(okl_long pid, okl_u64& minor, okl_u64& major) {
+    k_rusage ru{};
+    if (!ended_usage(pid, ru)) return false;
+    minor = static_cast<okl_u64>(ru.rest[3]);
+    major = static_cast<okl_u64>(ru.rest[4]);
     return true;
 }
 
