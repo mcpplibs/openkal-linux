@@ -5,11 +5,15 @@
 #include <openkal/task.h>
 
 namespace okl { extern char** g_envp; extern bool g_pipe_started_ignored; okl_ulong auxval(okl_ulong key); }
+// The transfer to a function on a stack of its own (task.cpp).
+extern "C" okl_long __okl_clone(int (*fn)(void*), void* stack, int flags, void* arg,
+                                int* ptid, void* tls, int* ctid);
 // Defined with what a unit uses, below (0.21).
 namespace okl {
 int child_outcome(okl_long pid, bool block, int* status, int* terminated, bool& ended);
 void job_forget(okl_long unit);
 bool child_memory(okl_long pid, bool ended, okl_u64& now, okl_u64& peak);
+bool child_cpu(okl_long pid, okl_u64& ns);
 }
 
 namespace {
@@ -353,9 +357,9 @@ inline okl_long handle_pid(kal_process h) { return static_cast<okl_long>(h.h & 0
 // where `execveat' is unusable: from the first start under a translator this
 // implementation recognises, and, elsewhere, by each start that meets ENOSYS,
 // which falls back in the started image itself. That fallback is learned by
-// no other start: the image is a copy made by `clone' without shared memory,
-// so nothing it learns reaches this program, and the price is one refused
-// system call per start.
+// no other start: the image writes nothing of this program's (start_plan), so
+// nothing it learns reaches this program, and the price is one refused system
+// call per start.
 //
 // Ported from the copy mcppls carried (vendor/openkal-linux 0.15.1), which set
 // the flag itself under PRoot; recognising the translator here removes that.
@@ -451,6 +455,268 @@ static bool entries_well_formed(const char** envp, const kal_uintptr* lens, kal_
     return true;
 }
 
+namespace {
+
+// WHAT THE STARTED IMAGE IS GIVEN, prepared before it exists. It runs in this
+// program's memory until it is replaced, so it reads this and writes nothing of
+// this program's but the digits of its own number in its own environment,
+// which this program releases unread; the descriptors it moves are its own
+// copies.
+struct start_plan {
+    const kal_spawn*       how;
+    const okl::terminated* name;
+    const okl_long*        granted;
+    int                    b, w;
+    okl_long               in, ou, er;
+    const vector*          args;
+    const vector*          envs;
+    const exec_report*     report;
+    const char*            resolved;
+    bool                   named, use_name, unit, bind;
+    okl_long               join, mine;
+    const unsigned long*   mask;
+};
+
+constexpr okl_uptr kStartStack = 64 * 1024;
+
+// THE STARTED IMAGE, until it is replaced: on its own stack, in this program's
+// memory, with every request held (kal_process_spawn).
+int start_image(void* arg) {
+    const start_plan& plan = *static_cast<const start_plan*>(arg);
+    const kal_spawn* const how = plan.how;
+    const okl::terminated& p = *plan.name;
+    const exec_report& report = *plan.report;
+    const vector& args = *plan.args;
+    const vector& envs = *plan.envs;
+    const int b = plan.b, w = plan.w;
+    const okl_long in = plan.in, ou = plan.ou, er = plan.er, join = plan.join, mine = plan.mine;
+    const bool named = plan.named, use_name = plan.use_name, unit = plan.unit, bind = plan.bind;
+    const char* const resolved = plan.resolved;
+    okl_long granted[16];
+    for (kal_uintptr i = 0; i < how->grant_count; ++i) granted[i] = plan.granted[i];
+
+    // A HANDLER OF THE CALLER'S IS NOT ENTERED HERE: each request it handles
+    // is given its default until the replacement, which gives every handled
+    // request its default in any case. One it ignores stays ignored, as the
+    // replacement keeps it.
+    for (int signo = 1; signo <= 64; ++signo) {
+        if (signo == 9 || signo == 19) continue;   // SIGKILL, SIGSTOP
+        struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act{};
+        if (okl::failed(okl::sys(okl::nr_rt_sigaction, signo, 0, reinterpret_cast<okl_long>(&act),
+                                 sizeof act.mask)))
+            continue;
+        if (act.handler == nullptr || act.handler == reinterpret_cast<void*>(1)) continue;
+        decltype(act) standard{};
+        okl::sys(okl::nr_rt_sigaction, signo, reinterpret_cast<okl_long>(&standard), 0, sizeof standard.mask);
+    }
+
+    // WHAT THE STARTED PROGRAM RECEIVES IS THE THREE STREAMS AND THE GRANTED
+    // DIRECTORIES, AND NOTHING ELSE (SPEC.md clause 7.13).
+    //
+    // Every source is first moved above the positions being filled, because
+    // placing one source on its position must not overwrite another that
+    // still has to be read: a granted directory, a stream, the base or the
+    // working directory may each occupy a number between 0 and 3+n. Placing
+    // them one at a time where they stood is how a grant named `work'
+    // arrived as a second copy of `/', and how a placement overwrote the
+    // base the program's name is resolved under. A source that is moved has
+    // its own descriptor flag; `dup3' then clears it on the copy it places,
+    // including where the source happened to be the position itself ---
+    // which `dup3' refuses, and which used to leave the copy marked to
+    // close, so that the grant never arrived.
+    const okl_long top = static_cast<okl_long>(3 + how->grant_count);
+    auto lift = [&](okl_long fd) -> okl_long {
+        const okl_long r = okl::sys(okl::nr_fcntl, fd, okl::f_dupfd_cloexec, top);
+        if (okl::failed(r)) {
+            report.say(r);
+            okl::sys(okl::nr_exit_group, 127);
+            for (;;) { }
+        }
+        return r;
+    };
+    const okl_long sin = in != 0 ? lift(in) : 0;
+    const okl_long sou = ou != 0 ? lift(ou) : 0;
+    const okl_long ser = er != 0 ? lift(er) : 0;
+    for (kal_uintptr i = 0; i < how->grant_count; ++i) granted[i] = lift(granted[i]);
+    const okl_long base = lift(b);
+    const okl_long work = lift(w);
+
+    if (sin != 0) okl::sys(okl::nr_dup3, sin, 0, 0);
+    if (sou != 0) okl::sys(okl::nr_dup3, sou, 1, 0);
+    if (ser != 0) okl::sys(okl::nr_dup3, ser, 2, 0);
+    for (kal_uintptr i = 0; i < how->grant_count; ++i)
+        okl::sys(okl::nr_dup3, granted[i], static_cast<okl_long>(3 + i), 0);
+
+    // What the CALLER itself inherited without the flag is not a handle it
+    // granted. A program that starts others inside a sandbox passes every
+    // descriptor it holds to them, and one of those reaching beyond the
+    // sandbox is exactly what the sandbox was for.
+    close_on_exec_from(top);
+
+    envs.stamp(okl::sys(okl::nr_getpid));
+
+    // THE DIRECTORY THE PROGRAM RUNS IN, AND THIS LINE IS THE WHOLE OF IT.
+    //
+    // `openat' below takes the base as a dirfd, but that only RESOLVES the
+    // name --- resolving a name is not entering a directory, which is what
+    // the comment here used to get wrong. Until 0.11 there was no second
+    // directory to enter, and a started program ran wherever this
+    // implementation happened to be.
+    //
+    // A FAILURE HERE MUST NOT REACH `execveat'. Running the right program
+    // in the wrong directory is precisely the silent wrongness this exists to
+    // remove, so it is reported through the same pipe an exec failure uses.
+    if (const okl_long e = okl::sys(okl::nr_fchdir, work); okl::failed(e)) {
+        report.say(e);
+        okl::sys(okl::nr_exit_group, 127);
+        for (;;) { }
+    }
+
+    // THE UNIT, ENTERED HERE AND NOT FROM THE PARENT: the parent's own
+    // `setpgid' on this child races the replacement below and loses once the
+    // program has been replaced. Zero means "your own", which is how a group
+    // comes into existence at all --- there is nothing to create beforehand,
+    // which is why the interface reports the identity rather than taking it.
+    if (unit) okl::sys(okl::nr_setpgid, 0, join);
+
+    // SIGPIPE AS THIS PROGRAM WAS STARTED WITH, not as this implementation
+    // set it for its own writes (env.cpp): an ignore would outlive `execve'.
+    if (!okl::g_pipe_started_ignored) {
+        struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; }
+            standard{ nullptr /* SIG_DFL */, 0, nullptr, 0 };
+        okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
+                 reinterpret_cast<okl_long>(&standard), 0, sizeof standard.mask);
+    }
+
+    if (bind) {
+        // 9 is SIGKILL: the binding must not be something the started program
+        // can decline, because the caller asked for a program that does not
+        // outlive it and not for one that is invited not to.
+        okl::sys(okl::nr_prctl, okl::pr_set_pdeathsig, 9, 0, 0, 0);
+        // The window: if the caller ended between the clone and the line
+        // above, the signal is already spent and this image would survive it.
+        if (okl::sys(okl::nr_getppid) != mine)
+            okl::sys(okl::nr_exit_group, 127);
+    }
+
+    // The caller's mask, which the program is started with, once nothing of
+    // the caller's can be entered here any more (above).
+    okl::sys(okl::nr_rt_sigprocmask, 2 /* SIG_SETMASK */, reinterpret_cast<okl_long>(plan.mask), 0,
+             sizeof *plan.mask);
+
+    // WHAT THE STARTED PROGRAM KEEPS IS A DESCRIPTOR FOR THE PROGRAM, NOT
+    // FOR THE DIRECTORY IT WAS FOUND IN, AND WITHOUT A DESCRIPTOR AT ALL A
+    // WHOLE CLASS OF PROGRAMS COULD NOT BE STARTED.
+    //
+    // `execveat' with a dirfd and a relative name gives the program's name to
+    // the kernel as `/dev/fd/<dirfd>/<name>'. That spelling is invisible to a
+    // caller and harmless for an ordinary executable --- the kernel already
+    // holds the file open. It stops being harmless the moment the program
+    // needs an INTERPRETER: a `#!' script, or a binary of another
+    // architecture registered through `binfmt_misc'. The kernel then starts
+    // the interpreter and hands it that name to open --- AFTER the
+    // replacement, by which time a close-on-exec descriptor is gone. The
+    // interpreter is told the script does not exist.
+    //
+    // Measured in twenty lines of plain C, with everything else identical:
+    //
+    //     descriptor WITH O_CLOEXEC       execveat -> ENOENT
+    //     descriptor WITHOUT O_CLOEXEC    STARTED ok
+    //
+    // It is not a property of one architecture. It was FOUND on aarch64,
+    // where every foreign binary needs the binfmt interpreter and so every
+    // start failed --- and it was mistaken there for a limit of the emulator.
+    // It reproduces natively on x86_64 with a `#!' script, which is what a
+    // consumer meets on any machine.
+    //
+    // The descriptor that survives must not be the base. A copy of the base
+    // is a handle on a whole directory, often `/', and a program that runs
+    // other programs in a sandbox hands it on to them, where
+    // `/proc/self/fd/<n>/' reaches whatever the sandbox hid. So the program
+    // itself is opened here, with `O_PATH' because it is only to be named
+    // and not read, and `execveat' is given that descriptor and an empty
+    // name. The interpreter's `/dev/fd/<n>' then names the file, and nothing
+    // can be walked out of a descriptor for a file.
+    //
+    // AND ONLY A PROGRAM THAT NEEDS AN INTERPRETER KEEPS EVEN THAT. The
+    // descriptor is opened with `O_CLOEXEC', and an ordinary executable,
+    // which the kernel holds open itself, starts with nothing left behind.
+    // A program that needs an interpreter is refused with ENOENT BEFORE the
+    // point of no return --- `binfmt_script' and `binfmt_misc' test whether
+    // the name will still be reachable and answer that it will not --- so
+    // the image is still here to clear the flag and ask again. The other
+    // sources of ENOENT on an open descriptor, an interpreter that does not
+    // exist, answer the same the second time.
+    //
+    // The descriptor is moved above the placed positions as well: where
+    // the caller had no standard input and supplied none, the lowest free
+    // number is 0, and a script would read its own descriptor as input.
+    //
+    // A SCRIPT IS GIVEN ITS NAME WHERE THE NAME REACHES THE SAME FILE
+    // (0.18.1). Through the descriptor a script sees `$0' as `/dev/fd/<n>',
+    // and one that locates its neighbours with `dirname "$0"' --- a wrapper
+    // installed beside the files it runs, a test's stub provider --- finds
+    // none of them: measured in mcpp, whose provider stub wrote beside
+    // itself into `/dev/fd/ticks'. So a program that needs an interpreter is
+    // started by its absolute name, as every shell and `posix_spawn' start
+    // it, when that name is known and names the file the descriptor holds
+    // (the same device and inode, so the name grants nothing the descriptor
+    // did not). Only where it does not --- a base the kernel cannot name, a
+    // name rebound since it was opened --- is the descriptor kept, with the
+    // price stated above: the descriptor still names the program and can be
+    // reopened through `/proc/self/fd/<n>', as `/proc/self/exe' can.
+    //
+    // Opened HERE, in the started image, and not where the preopens are made:
+    // the caller's own descriptors stay close-on-exec, which is what every
+    // other operation of this implementation relies upon.
+    //
+    // A name that cannot be opened is reported exactly as one that cannot be
+    // started is, through the same pipe.
+    if (use_name) {
+        const okl_long why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
+                                      reinterpret_cast<okl_long>(args.slots),
+                                      reinterpret_cast<okl_long>(envs.slots));
+        report.say(why);
+        okl::sys(okl::nr_exit_group, 127);
+        for (;;) { }
+    }
+    okl_long exe = okl::sys(okl::nr_openat, base, reinterpret_cast<okl_long>(p.buf),
+                            okl::o_path | okl::o_cloexec, 0);
+    if (okl::failed(exe)) {
+        report.say(exe);
+        okl::sys(okl::nr_exit_group, 127);
+        for (;;) { }
+    }
+    if (exe < top) exe = lift(exe);
+
+    auto start = [&] {
+        return okl::sys(okl::nr_execveat, exe, reinterpret_cast<okl_long>(""),
+                        reinterpret_cast<okl_long>(args.slots),
+                        reinterpret_cast<okl_long>(envs.slots), okl::at_empty_path);
+    };
+    okl_long why = start();
+    if (why == -okl::e_noent && named && same_file(exe, resolved))
+        why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
+                       reinterpret_cast<okl_long>(args.slots),
+                       reinterpret_cast<okl_long>(envs.slots));
+    if (why == -okl::e_noent) {
+        okl::sys(okl::nr_fcntl, exe, okl::f_setfd, 0);
+        why = start();
+    }
+    if (why == -okl::e_nosys && named)
+        why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
+                       reinterpret_cast<okl_long>(args.slots),
+                       reinterpret_cast<okl_long>(envs.slots));
+    // Reached only when the replacement did not happen, because when it does
+    // there is nothing here to reach.
+    report.say(why);
+    okl::sys(okl::nr_exit_group, 127);
+    for (;;) { }
+    
+}
+
+}  // namespace
+
 int kal_process_spawn(const kal_spawn* how,
                       const char* path, kal_uintptr path_len,
                       const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
@@ -523,208 +789,37 @@ int kal_process_spawn(const kal_spawn* how,
     exec_report report;
     report.open(how->grant_count);
 
-    const okl_long child = okl::sys(okl::nr_clone, 17 /* SIGCHLD */, 0, 0, 0, 0);
+    // THE STARTED IMAGE SHARES THIS PROGRAM'S MEMORY UNTIL IT IS REPLACED
+    // (CLONE_VM | CLONE_VFORK), on a stack of its own, and this context waits
+    // for the replacement, as a C library's `posix_spawn' starts a program. A
+    // copy of the address space (clone with SIGCHLD alone, until 0.22) copied the
+    // page tables of the whole program and marked every page it had written to
+    // be copied, so that each page it wrote afterwards faulted again: measured in
+    // a language server that starts a worker for each module it builds, 1.4 ms in
+    // the kernel for each start and a third of a million faults over 176 starts,
+    // a fifth of its processor time.
+    //
+    // Every request is held until the image is replaced. A handler of this
+    // program run in the image would run in this program's memory; so the image
+    // sets every handler to the default first, and only then takes the mask the
+    // caller had (start_image).
+    unsigned long every = ~0ul, caller_mask = 0;
+    okl::sys(okl::nr_rt_sigprocmask, 2 /* SIG_SETMASK */, reinterpret_cast<okl_long>(&every),
+             reinterpret_cast<okl_long>(&caller_mask), sizeof every);
+    const start_plan plan{ how, &p, granted, b, w, in, ou, er, &args, &envs, &report, resolved,
+                           named, use_name, unit, bind, join, mine, &caller_mask };
+    const okl_long stack = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(kStartStack),
+                                    okl::prot_read | okl::prot_write,
+                                    okl::map_private | okl::map_anonymous, -1, 0);
+    const okl_long child = okl::failed(stack)
+        ? stack
+        : __okl_clone(&start_image, reinterpret_cast<char*>(stack) + kStartStack,
+                      0x100 /* CLONE_VM */ | 0x4000 /* CLONE_VFORK */ | 17 /* SIGCHLD */,
+                      const_cast<start_plan*>(&plan), nullptr, nullptr, nullptr);
+    okl::sys(okl::nr_rt_sigprocmask, 2 /* SIG_SETMASK */, reinterpret_cast<okl_long>(&caller_mask), 0,
+             sizeof caller_mask);
+    if (!okl::failed(stack)) okl::sys(okl::nr_munmap, stack, static_cast<okl_long>(kStartStack));
     if (okl::failed(child)) { report.close_both(); return okl::translate(child); }
-
-    if (child == 0) {
-        // WHAT THE STARTED PROGRAM RECEIVES IS THE THREE STREAMS AND THE GRANTED
-        // DIRECTORIES, AND NOTHING ELSE (SPEC.md clause 7.13).
-        //
-        // Every source is first moved above the positions being filled, because
-        // placing one source on its position must not overwrite another that
-        // still has to be read: a granted directory, a stream, the base or the
-        // working directory may each occupy a number between 0 and 3+n. Placing
-        // them one at a time where they stood is how a grant named `work'
-        // arrived as a second copy of `/', and how a placement overwrote the
-        // base the program's name is resolved under. A source that is moved has
-        // its own descriptor flag; `dup3' then clears it on the copy it places,
-        // including where the source happened to be the position itself ---
-        // which `dup3' refuses, and which used to leave the copy marked to
-        // close, so that the grant never arrived.
-        const okl_long top = static_cast<okl_long>(3 + how->grant_count);
-        auto lift = [&](okl_long fd) -> okl_long {
-            const okl_long r = okl::sys(okl::nr_fcntl, fd, okl::f_dupfd_cloexec, top);
-            if (okl::failed(r)) {
-                report.say(r);
-                okl::sys(okl::nr_exit_group, 127);
-                for (;;) { }
-            }
-            return r;
-        };
-        const okl_long sin = in != 0 ? lift(in) : 0;
-        const okl_long sou = ou != 0 ? lift(ou) : 0;
-        const okl_long ser = er != 0 ? lift(er) : 0;
-        for (kal_uintptr i = 0; i < how->grant_count; ++i) granted[i] = lift(granted[i]);
-        const okl_long base = lift(b);
-        const okl_long work = lift(w);
-
-        if (sin != 0) okl::sys(okl::nr_dup3, sin, 0, 0);
-        if (sou != 0) okl::sys(okl::nr_dup3, sou, 1, 0);
-        if (ser != 0) okl::sys(okl::nr_dup3, ser, 2, 0);
-        for (kal_uintptr i = 0; i < how->grant_count; ++i)
-            okl::sys(okl::nr_dup3, granted[i], static_cast<okl_long>(3 + i), 0);
-
-        // What the CALLER itself inherited without the flag is not a handle it
-        // granted. A program that starts others inside a sandbox passes every
-        // descriptor it holds to them, and one of those reaching beyond the
-        // sandbox is exactly what the sandbox was for.
-        close_on_exec_from(top);
-
-        envs.stamp(okl::sys(okl::nr_getpid));
-
-        // THE DIRECTORY THE PROGRAM RUNS IN, AND THIS LINE IS THE WHOLE OF IT.
-        //
-        // `openat' below takes the base as a dirfd, but that only RESOLVES the
-        // name --- resolving a name is not entering a directory, which is what
-        // the comment here used to get wrong. Until 0.11 there was no second
-        // directory to enter, and a started program ran wherever this
-        // implementation happened to be.
-        //
-        // A FAILURE HERE MUST NOT REACH `execveat'. Running the right program
-        // in the wrong directory is precisely the silent wrongness this exists to
-        // remove, so it is reported through the same pipe an exec failure uses.
-        if (const okl_long e = okl::sys(okl::nr_fchdir, work); okl::failed(e)) {
-            report.say(e);
-            okl::sys(okl::nr_exit_group, 127);
-            for (;;) { }
-        }
-
-        // THE UNIT, ENTERED HERE AND NOT FROM THE PARENT: the parent's own
-        // `setpgid' on this child races the replacement below and loses once the
-        // program has been replaced. Zero means "your own", which is how a group
-        // comes into existence at all --- there is nothing to create beforehand,
-        // which is why the interface reports the identity rather than taking it.
-        if (unit) okl::sys(okl::nr_setpgid, 0, join);
-
-        // SIGPIPE AS THIS PROGRAM WAS STARTED WITH, not as this implementation
-        // set it for its own writes (env.cpp): an ignore would outlive `execve'.
-        if (!okl::g_pipe_started_ignored) {
-            struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; }
-                standard{ nullptr /* SIG_DFL */, 0, nullptr, 0 };
-            okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
-                     reinterpret_cast<okl_long>(&standard), 0, sizeof standard.mask);
-        }
-
-        if (bind) {
-            // 9 is SIGKILL: the binding must not be something the started program
-            // can decline, because the caller asked for a program that does not
-            // outlive it and not for one that is invited not to.
-            okl::sys(okl::nr_prctl, okl::pr_set_pdeathsig, 9, 0, 0, 0);
-            // The window: if the caller ended between the clone and the line
-            // above, the signal is already spent and this image would survive it.
-            if (okl::sys(okl::nr_getppid) != mine)
-                okl::sys(okl::nr_exit_group, 127);
-        }
-
-        // WHAT THE STARTED PROGRAM KEEPS IS A DESCRIPTOR FOR THE PROGRAM, NOT
-        // FOR THE DIRECTORY IT WAS FOUND IN, AND WITHOUT A DESCRIPTOR AT ALL A
-        // WHOLE CLASS OF PROGRAMS COULD NOT BE STARTED.
-        //
-        // `execveat' with a dirfd and a relative name gives the program's name to
-        // the kernel as `/dev/fd/<dirfd>/<name>'. That spelling is invisible to a
-        // caller and harmless for an ordinary executable --- the kernel already
-        // holds the file open. It stops being harmless the moment the program
-        // needs an INTERPRETER: a `#!' script, or a binary of another
-        // architecture registered through `binfmt_misc'. The kernel then starts
-        // the interpreter and hands it that name to open --- AFTER the
-        // replacement, by which time a close-on-exec descriptor is gone. The
-        // interpreter is told the script does not exist.
-        //
-        // Measured in twenty lines of plain C, with everything else identical:
-        //
-        //     descriptor WITH O_CLOEXEC       execveat -> ENOENT
-        //     descriptor WITHOUT O_CLOEXEC    STARTED ok
-        //
-        // It is not a property of one architecture. It was FOUND on aarch64,
-        // where every foreign binary needs the binfmt interpreter and so every
-        // start failed --- and it was mistaken there for a limit of the emulator.
-        // It reproduces natively on x86_64 with a `#!' script, which is what a
-        // consumer meets on any machine.
-        //
-        // The descriptor that survives must not be the base. A copy of the base
-        // is a handle on a whole directory, often `/', and a program that runs
-        // other programs in a sandbox hands it on to them, where
-        // `/proc/self/fd/<n>/' reaches whatever the sandbox hid. So the program
-        // itself is opened here, with `O_PATH' because it is only to be named
-        // and not read, and `execveat' is given that descriptor and an empty
-        // name. The interpreter's `/dev/fd/<n>' then names the file, and nothing
-        // can be walked out of a descriptor for a file.
-        //
-        // AND ONLY A PROGRAM THAT NEEDS AN INTERPRETER KEEPS EVEN THAT. The
-        // descriptor is opened with `O_CLOEXEC', and an ordinary executable,
-        // which the kernel holds open itself, starts with nothing left behind.
-        // A program that needs an interpreter is refused with ENOENT BEFORE the
-        // point of no return --- `binfmt_script' and `binfmt_misc' test whether
-        // the name will still be reachable and answer that it will not --- so
-        // the image is still here to clear the flag and ask again. The other
-        // sources of ENOENT on an open descriptor, an interpreter that does not
-        // exist, answer the same the second time.
-        //
-        // The descriptor is moved above the placed positions as well: where
-        // the caller had no standard input and supplied none, the lowest free
-        // number is 0, and a script would read its own descriptor as input.
-        //
-        // A SCRIPT IS GIVEN ITS NAME WHERE THE NAME REACHES THE SAME FILE
-        // (0.18.1). Through the descriptor a script sees `$0' as `/dev/fd/<n>',
-        // and one that locates its neighbours with `dirname "$0"' --- a wrapper
-        // installed beside the files it runs, a test's stub provider --- finds
-        // none of them: measured in mcpp, whose provider stub wrote beside
-        // itself into `/dev/fd/ticks'. So a program that needs an interpreter is
-        // started by its absolute name, as every shell and `posix_spawn' start
-        // it, when that name is known and names the file the descriptor holds
-        // (the same device and inode, so the name grants nothing the descriptor
-        // did not). Only where it does not --- a base the kernel cannot name, a
-        // name rebound since it was opened --- is the descriptor kept, with the
-        // price stated above: the descriptor still names the program and can be
-        // reopened through `/proc/self/fd/<n>', as `/proc/self/exe' can.
-        //
-        // Opened HERE, in the started image, and not where the preopens are made:
-        // the caller's own descriptors stay close-on-exec, which is what every
-        // other operation of this implementation relies upon.
-        //
-        // A name that cannot be opened is reported exactly as one that cannot be
-        // started is, through the same pipe.
-        if (use_name) {
-            const okl_long why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
-                                          reinterpret_cast<okl_long>(args.slots),
-                                          reinterpret_cast<okl_long>(envs.slots));
-            report.say(why);
-            okl::sys(okl::nr_exit_group, 127);
-            for (;;) { }
-        }
-        okl_long exe = okl::sys(okl::nr_openat, base, reinterpret_cast<okl_long>(p.buf),
-                                okl::o_path | okl::o_cloexec, 0);
-        if (okl::failed(exe)) {
-            report.say(exe);
-            okl::sys(okl::nr_exit_group, 127);
-            for (;;) { }
-        }
-        if (exe < top) exe = lift(exe);
-
-        auto start = [&] {
-            return okl::sys(okl::nr_execveat, exe, reinterpret_cast<okl_long>(""),
-                            reinterpret_cast<okl_long>(args.slots),
-                            reinterpret_cast<okl_long>(envs.slots), okl::at_empty_path);
-        };
-        okl_long why = start();
-        if (why == -okl::e_noent && named && same_file(exe, resolved))
-            why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
-                           reinterpret_cast<okl_long>(args.slots),
-                           reinterpret_cast<okl_long>(envs.slots));
-        if (why == -okl::e_noent) {
-            okl::sys(okl::nr_fcntl, exe, okl::f_setfd, 0);
-            why = start();
-        }
-        if (why == -okl::e_nosys && named)
-            why = okl::sys(okl::nr_execve, reinterpret_cast<okl_long>(resolved),
-                           reinterpret_cast<okl_long>(args.slots),
-                           reinterpret_cast<okl_long>(envs.slots));
-        // Reached only when the replacement did not happen, because when it does
-        // there is nothing here to reach.
-        report.say(why);
-        okl::sys(okl::nr_exit_group, 127);
-        for (;;) { }
-    }
 
     if (const okl_long why = report.heard()) {
         reap(child);
@@ -1208,9 +1303,13 @@ int kal_process_info(kal_process p, kal_u32 wanted, kal_program_info* out) {
             v.present |= KAL_PINFO_STARTED;
         }
     }
-    if (!ended && (wanted & KAL_PINFO_CPU)) {
+    // CPU (0.21): of a started program that has ended, from the record the
+    // kernel keeps until it is collected, as its peak memory below.
+    if (wanted & KAL_PINFO_CPU) {
         okl_u64 c = 0;
-        if (cpu_ns(pid, me, c)) { v.cpu_ns = c; v.present |= KAL_PINFO_CPU; }
+        const bool ok = !ended ? cpu_ns(pid, me, c)
+                     : handle_kind(p) == kind_child && okl::child_cpu(pid, c);
+        if (ok) { v.cpu_ns = c; v.present |= KAL_PINFO_CPU; }
     }
     // MEMORY (openkal 0.20): resident now and at most, from the kernel's record;
     // of a started program that has ended, its peak from the record it keeps
@@ -1506,6 +1605,14 @@ bool child_memory(okl_long pid, bool ended, okl_u64& now, okl_u64& peak) {
     if (!ended_usage(pid, ru)) return false;
     now = 0;
     peak = static_cast<okl_u64>(ru.maxrss) * 1024;
+    return true;
+}
+
+bool child_cpu(okl_long pid, okl_u64& ns) {
+    k_rusage ru{};
+    if (!ended_usage(pid, ru)) return false;
+    ns = static_cast<okl_u64>(ru.utime_s + ru.stime_s) * 1000000000ull
+       + static_cast<okl_u64>(ru.utime_us + ru.stime_us) * 1000ull;
     return true;
 }
 

@@ -22,8 +22,6 @@ namespace okl { okl_ulong auxval(okl_ulong key); }
 // is not an optimisation: in that arrangement the choice is between creating
 // contexts here and not providing openkal.task at all.
 
-#ifdef OKL_STANDALONE
-
 // The child of a clone begins on a stack of its own with no return address, so
 // the transfer cannot be written in C. The sequence is the one every C library
 // uses, and it is short enough to read: the arguments are moved into the
@@ -84,10 +82,11 @@ __asm__(
 );
 #endif
 
+// In both arrangements: a program is started by it as well (process.cpp).
 extern "C" okl_long __okl_clone(int (*fn)(void*), void* stack, int flags, void* arg,
                                 int* ptid, void* tls, int* ctid);
 
-#else
+#ifndef OKL_STANDALONE
 // THE HOST'S OWN ENQUIRY, WHICH IS A NAME THIS IMPLEMENTATION MAY TAKE IN THIS
 // ARRANGEMENT AND ONLY IN THIS ONE. A program that carries a runtime is a
 // program whose runtime owns the stacks, and `pthread_getattr_np' is how that

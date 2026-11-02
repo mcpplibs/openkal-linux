@@ -43,6 +43,9 @@ struct spin {
 
 spin  g_lock;
 void* g_free[kClasses];
+// The part of each class's newest chunk no block has been carved from yet.
+unsigned char* g_next[kClasses];
+unsigned char* g_end[kClasses];
 
 int class_of(okl_uptr n) {
     okl_uptr s = kMinBlock; int c = 0;
@@ -66,19 +69,29 @@ void unmap(void* p, okl_uptr bytes) {
 okl_uptr round_up(okl_uptr n, okl_uptr to) { return (n + to - 1) & ~(to - 1); }
 
 // A chunk is page-aligned and a block size is a power of two no larger than a
-// chunk, so a block at a multiple of its size is aligned to its size. That is
-// why an alignment request is satisfied by choosing a larger class rather than
-// by padding: no metadata is needed, and none is kept.
-bool refill(int c) {
+// chunk, so a block at a multiple of its size is aligned to its size or to the
+// page, whichever is smaller. That is why an alignment request up to 4096 bytes
+// (the smallest page among the environments) is satisfied by choosing a larger
+// class rather than by padding: no metadata is needed, and none is kept. A
+// wider alignment is mapped (below), as a block of a class would not have it.
+//
+// A CHUNK IS CARVED AS ITS BLOCKS ARE HANDED OUT, NOT WHEN IT IS MAPPED. A free
+// list threaded through the whole chunk at once wrote a pointer into each of
+// its blocks, so every page of every chunk was made resident before a block of
+// it was used: measured, six classes and six mebibytes resident, 1 500 page
+// faults, in each program an ok image's loader started --- three quarters of
+// what such a program paid before its first instruction.
+void* carve(int c) {
     const okl_uptr bs = size_of(c);
-    auto* base = static_cast<unsigned char*>(map(kChunk));
-    if (!base) return false;
-    for (okl_uptr off = kChunk; off >= bs; off -= bs) {
-        auto* b = base + off - bs;
-        *reinterpret_cast<void**>(b) = g_free[c];
-        g_free[c] = b;
+    if (g_next[c] == g_end[c]) {
+        auto* base = static_cast<unsigned char*>(map(kChunk));
+        if (!base) return nullptr;
+        g_next[c] = base;
+        g_end[c] = base + kChunk;
     }
-    return true;
+    void* b = g_next[c];
+    g_next[c] += bs;
+    return b;
 }
 
 }  // namespace
@@ -90,12 +103,12 @@ void* kal_alloc(kal_uintptr size, kal_uintptr align) {
     if (align < kMinBlock) align = kMinBlock;
 
     okl_uptr want = size < align ? align : size;
-    if (want <= kMaxSmall) {
+    if (want <= kMaxSmall && align <= 4096) {
         const int c = class_of(want);
         g_lock.lock();
-        if (!g_free[c] && !refill(c)) { g_lock.unlock(); return nullptr; }
         void* b = g_free[c];
-        g_free[c] = *reinterpret_cast<void**>(b);
+        if (b) g_free[c] = *reinterpret_cast<void**>(b);
+        else b = carve(c);
         g_lock.unlock();
         return b;
     }
@@ -128,7 +141,7 @@ void kal_free(void* p, kal_uintptr size, kal_uintptr align) {
     if (align < kMinBlock) align = kMinBlock;
 
     const okl_uptr want = size < align ? align : size;
-    if (want <= kMaxSmall) {
+    if (want <= kMaxSmall && align <= 4096) {
         const int c = class_of(want);
         g_lock.lock();
         *reinterpret_cast<void**>(p) = g_free[c];

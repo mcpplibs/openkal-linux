@@ -1,5 +1,7 @@
 #include "sys.h"
+#include "handle.h"
 #include <openkal/exec.h>
+#include <openkal/map.h>
 
 namespace okl { okl_ulong auxval(okl_ulong key); }
 
@@ -114,6 +116,40 @@ int kal_exec_publish_part(void* region, kal_uintptr offset, kal_uintptr size) {
 
 kal_uintptr kal_exec_granularity(void) { return page(); }
 
+// A PART THAT IS A FILE'S (0.21): the file's pages mapped over the part,
+// private, and executable where asked. MAP_FIXED replaces what the part held in
+// one call, so there is no moment at which the addresses are free for another
+// mapping to take. The arguments are checked first: a refused part leaves the
+// region as it was.
+int kal_exec_map_part(void* region, kal_uintptr offset, kal_uintptr size, kal_file f, kal_u64 at,
+                      kal_uintptr how) {
+    const okl_uptr g = page();
+    const int fd = okl::unpack(f.h);
+    if (region == nullptr || size == 0 || fd < 0 || (offset & (g - 1)) != 0 || (size & (g - 1)) != 0
+        || (reinterpret_cast<okl_uptr>(region) & (g - 1)) != 0 || at % KAL_MAP_ALIGNMENT != 0
+        || (how & ~KAL_EXEC_MAP_EXECUTE) != 0)
+        return kal_err_invalid;
+    okl::kstat st{};
+    const okl_long s = okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&st));
+    if (okl::failed(s)) return okl::translate(s);
+    if ((st.mode & okl::s_ifmt) != okl::s_ifreg) return kal_err_not_supported;
+    const kal_u64 length = st.size > 0 ? static_cast<kal_u64>(st.size) : 0;
+    if (at > length || static_cast<kal_u64>(size) > length - at) return kal_err_invalid;
+    const okl_long prot = okl::prot_read | ((how & KAL_EXEC_MAP_EXECUTE) ? okl::prot_exec : 0);
+    const okl_long r = okl::sys(okl::nr_mmap,
+                                reinterpret_cast<okl_long>(static_cast<char*>(region) + offset),
+                                static_cast<okl_long>(size), prot, okl::map_private | okl::map_fixed, fd,
+                                static_cast<okl_long>(at));
+    if (okl::failed(r)) {
+        // ENODEV: the file system does not map. EPERM: its files are not
+        // executed (a volume mounted noexec). The resource refuses, not the
+        // implementation (exec.h).
+        if (-r == okl::e_nodev || -r == okl::e_perm) return kal_err_not_supported;
+        return okl::translate(r);
+    }
+    return kal_ok;
+}
+
 void kal_exec_free(void* p, kal_uintptr size) {
     if (p == nullptr || size == 0) return;
     const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), page());
@@ -127,7 +163,7 @@ void kal_exec_free(void* p, kal_uintptr size) {
 kal_uintptr kal_exec_props(void) {
     // Executable memory is available to every artifact on this kernel: nothing
     // here is granted only to a program produced in a particular way.
-    return KAL_EXEC_PROP_REPUBLISH | KAL_EXEC_PROP_AVAILABLE;
+    return KAL_EXEC_PROP_REPUBLISH | KAL_EXEC_PROP_AVAILABLE | KAL_EXEC_PROP_FILE;
 }
 
 }  // extern "C"
