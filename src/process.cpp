@@ -533,9 +533,25 @@ int start_image(void* arg) {
         }
         return r;
     };
-    const okl_long sin = in != 0 ? lift(in) : 0;
-    const okl_long sou = ou != 0 ? lift(ou) : 0;
-    const okl_long ser = er != 0 ? lift(er) : 0;
+    // THE NULL DEVICE (openkal 0.22), opened here, in the started image, so
+    // that the caller holds no descriptor for it; it is placed as any other
+    // source is. Its descriptor is marked to close, so the replacement keeps
+    // only the positions it was placed at.
+    const kal_uintptr nulls = how->flags & (KAL_SPAWN_NULL_IN | KAL_SPAWN_NULL_OUT | KAL_SPAWN_NULL_ERR);
+    okl_long device = 0;
+    if (nulls != 0) {
+        const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>("/dev/null"),
+                                     okl::o_rdwr | okl::o_cloexec, 0);
+        if (okl::failed(fd)) {
+            report.say(fd);
+            okl::sys(okl::nr_exit_group, 127);
+            for (;;) { }
+        }
+        device = lift(fd);
+    }
+    const okl_long sin = (how->flags & KAL_SPAWN_NULL_IN)  ? device : in != 0 ? lift(in) : 0;
+    const okl_long sou = (how->flags & KAL_SPAWN_NULL_OUT) ? device : ou != 0 ? lift(ou) : 0;
+    const okl_long ser = (how->flags & KAL_SPAWN_NULL_ERR) ? device : er != 0 ? lift(er) : 0;
     for (kal_uintptr i = 0; i < how->grant_count; ++i) granted[i] = lift(granted[i]);
     const okl_long base = lift(b);
     const okl_long work = lift(w);
@@ -734,7 +750,15 @@ int kal_process_spawn(const kal_spawn* how,
     // bound lifetime and received a program without one has been given a program
     // that outlives it --- which is the failure the flag exists to remove --- so an
     // unclaimed position is an error and not a thing to proceed without.
-    if (how->flags & ~KAL_SPAWN_BOUND_LIFETIME) return kal_err_not_supported;
+    constexpr kal_uintptr nulls = KAL_SPAWN_NULL_IN | KAL_SPAWN_NULL_OUT | KAL_SPAWN_NULL_ERR;
+    if (how->flags & ~(KAL_SPAWN_BOUND_LIFETIME | nulls)) return kal_err_not_supported;
+    // THE NULL DEVICE BESIDE A STREAM AT ONE POSITION is two answers to one
+    // question (openkal 0.22, clause 7.15).
+    if (streams != nullptr
+        && (((how->flags & KAL_SPAWN_NULL_IN) && streams->in.h != 0)
+            || ((how->flags & KAL_SPAWN_NULL_OUT) && streams->out.h != 0)
+            || ((how->flags & KAL_SPAWN_NULL_ERR) && streams->err.h != 0)))
+        return kal_err_invalid;
 
     okl::terminated p(path, path_len);
     if (!p.ok) return kal_err_invalid;
@@ -1358,6 +1382,7 @@ kal_uintptr kal_process_props(void) {
          | KAL_PROCESS_PROP_BOUND_LIFETIME
          | KAL_PROCESS_PROP_JOB | KAL_PROCESS_PROP_JOB_USAGE
          | KAL_PROCESS_PROP_JOB_LIMIT_SUPERVISED
+         | KAL_PROCESS_PROP_NULL_STREAMS
          | (open_id_available() || stat_state(0) != 0 ? KAL_PROCESS_PROP_OPEN_ID : 0u)
          // AGREES WITH `kal_process_stop_requested', because the header
          // defines null there as the absence this position reports. Read and

@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.21.0"
+openkal = "0.22.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.22.0"
+openkal-linux = "0.23.0"
 ```
 
 ## Why it does not use a C library
@@ -101,6 +101,14 @@ plus 256 pages.
 A program that carries a runtime of its own answers from that runtime instead
 (`pthread_getattr_np`), because in that arrangement the runtime is what owns the
 stacks and is what a program above openkal would ask for itself.
+
+## What 0.23 adds (openkal 0.22)
+
+**The null device at a position.** `KAL_SPAWN_NULL_IN`, `KAL_SPAWN_NULL_OUT` and
+`KAL_SPAWN_NULL_ERR` place `/dev/null` at the started program's standard input,
+output or error; `KAL_PROCESS_PROP_NULL_STREAMS` is claimed. The device is opened
+in the started image before it is replaced, so the caller holds no descriptor for
+it. A flag beside a stream at the same position is `kal_err_invalid`.
 
 ## What 0.22 adds (openkal 0.21)
 
