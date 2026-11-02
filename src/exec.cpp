@@ -39,6 +39,25 @@ okl_uptr round_up(okl_uptr n, okl_uptr to) { return (n + to - 1) & ~(to - 1); }
 
 }  // namespace
 
+namespace {
+// Whether this kernel has `mseal': it answers a range of no length with zero,
+// and a kernel without it ENOSYS.
+bool sealing() {
+    static int known = -1;
+    if (known < 0) known = okl::failed(okl::sys(okl::nr_mseal, 0, 0, 0)) ? 0 : 1;
+    return known == 1;
+}
+// Whether instructions mapped PROT_BTI are held to branch targets: the
+// processor states it in AT_HWCAP2 (HWCAP2_BTI), and only on aarch64.
+bool branch_targets() {
+#if defined(__aarch64__)
+    return (okl::auxval(26 /* AT_HWCAP2 */) & (okl_ulong{1} << 17)) != 0;
+#else
+    return false;
+#endif
+}
+}  // namespace
+
 extern "C" {
 
 void* kal_exec_alloc(kal_uintptr size) {
@@ -134,6 +153,25 @@ int kal_exec_publish_part(void* region, kal_uintptr offset, kal_uintptr size) {
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
+// SEALED READ-ONLY (0.23): the protection, and, for ever, `mseal' (Linux 6.10)
+// over it, after which the kernel refuses to change the part's protection or to
+// unmap it --- `mprotect' and `munmap' of it report EPERM, which this
+// implementation reports as kal_err_permission.
+int kal_exec_seal_part(void* region, kal_uintptr offset, kal_uintptr size, kal_uintptr flags) {
+    const okl_uptr g = page();
+    if (region == nullptr || size == 0 || (offset & (g - 1)) != 0 || (size & (g - 1)) != 0
+        || (reinterpret_cast<okl_uptr>(region) & (g - 1)) != 0 || (flags & ~KAL_EXEC_SEAL_FOREVER) != 0)
+        return kal_err_invalid;
+    const okl_long at = reinterpret_cast<okl_long>(static_cast<char*>(region) + offset);
+    const okl_long r = okl::sys(okl::nr_mprotect, at, static_cast<okl_long>(size), okl::prot_read);
+    if (okl::failed(r)) return okl::translate(r);
+    if ((flags & KAL_EXEC_SEAL_FOREVER) && sealing()) {
+        const okl_long m = okl::sys(okl::nr_mseal, at, static_cast<okl_long>(size), 0);
+        if (okl::failed(m)) return okl::translate(m);
+    }
+    return kal_ok;
+}
+
 kal_uintptr kal_exec_granularity(void) { return page(); }
 
 // A PART THAT IS A FILE'S (0.21): the file's pages mapped over the part,
@@ -147,7 +185,7 @@ int kal_exec_map_part(void* region, kal_uintptr offset, kal_uintptr size, kal_fi
     const int fd = okl::unpack(f.h);
     if (region == nullptr || size == 0 || fd < 0 || (offset & (g - 1)) != 0 || (size & (g - 1)) != 0
         || (reinterpret_cast<okl_uptr>(region) & (g - 1)) != 0 || at % KAL_MAP_ALIGNMENT != 0
-        || (how & ~KAL_EXEC_MAP_EXECUTE) != 0)
+        || (how & ~(KAL_EXEC_MAP_EXECUTE | KAL_EXEC_MAP_PREFETCH | KAL_EXEC_MAP_BTI)) != 0)
         return kal_err_invalid;
     okl::kstat st{};
     const okl_long s = okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&st));
@@ -155,10 +193,17 @@ int kal_exec_map_part(void* region, kal_uintptr offset, kal_uintptr size, kal_fi
     if ((st.mode & okl::s_ifmt) != okl::s_ifreg) return kal_err_not_supported;
     const kal_u64 length = st.size > 0 ? static_cast<kal_u64>(st.size) : 0;
     if (at > length || static_cast<kal_u64>(size) > length - at) return kal_err_invalid;
-    const okl_long prot = okl::prot_read | ((how & KAL_EXEC_MAP_EXECUTE) ? okl::prot_exec : 0);
+    // READ IN NOW (0.23): MAP_POPULATE reads the part and fills its page
+    // tables in the one call, where each page would otherwise be a fault of its
+    // own on its first touch. BRANCH TARGETS: PROT_BTI, where the processor
+    // holds them.
+    const bool bti = (how & KAL_EXEC_MAP_BTI) && (how & KAL_EXEC_MAP_EXECUTE) && branch_targets();
+    const okl_long prot = okl::prot_read | ((how & KAL_EXEC_MAP_EXECUTE) ? okl::prot_exec : 0)
+                        | (bti ? 0x10 /* PROT_BTI */ : 0);
+    const okl_long populate = (how & KAL_EXEC_MAP_PREFETCH) ? 0x8000 /* MAP_POPULATE */ : 0;
     const okl_long r = okl::sys(okl::nr_mmap,
                                 reinterpret_cast<okl_long>(static_cast<char*>(region) + offset),
-                                static_cast<okl_long>(size), prot, okl::map_private | okl::map_fixed, fd,
+                                static_cast<okl_long>(size), prot, okl::map_private | okl::map_fixed | populate, fd,
                                 static_cast<okl_long>(at));
     if (okl::failed(r)) {
         // ENODEV: the file system does not map. EPERM: its files are not
@@ -183,7 +228,8 @@ void kal_exec_free(void* p, kal_uintptr size) {
 kal_uintptr kal_exec_props(void) {
     // Executable memory is available to every artifact on this kernel: nothing
     // here is granted only to a program produced in a particular way.
-    return KAL_EXEC_PROP_REPUBLISH | KAL_EXEC_PROP_AVAILABLE | KAL_EXEC_PROP_FILE | KAL_EXEC_PROP_PLACE;
+    return KAL_EXEC_PROP_REPUBLISH | KAL_EXEC_PROP_AVAILABLE | KAL_EXEC_PROP_FILE | KAL_EXEC_PROP_PLACE
+         | (sealing() ? KAL_EXEC_PROP_SEAL_FOREVER : 0u) | (branch_targets() ? KAL_EXEC_PROP_BTI : 0u);
 }
 
 }  // extern "C"

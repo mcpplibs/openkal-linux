@@ -62,6 +62,8 @@ provides-interfaces = [
     "openkal.timeout",
     "openkal.map",
     "openkal.region",
+    "openkal.prof",
+    "openkal.debug",
 ]
 
 [dependencies]

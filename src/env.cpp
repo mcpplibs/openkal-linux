@@ -1,6 +1,7 @@
 #include "sys.h"
 #include <openkal/env.h>
 
+namespace okl { int resource_preference(); }
 namespace okl {
 
 // The vectors the kernel places on the stack at inception. They are recorded
@@ -252,4 +253,45 @@ kal_intptr kal_env_system(char* out, kal_uintptr cap) {
     return give("linux", 5, out, cap);
 }
 
+// THE RESOURCE PREFERENCE (0.23), which a start conveys in KAL_RESOURCES
+// (process.cpp) and a person sets the same way.
+int kal_env_resources(void) { return okl::resource_preference(); }
+
 }
+
+namespace okl {
+int resource_preference() {
+    static int known = -1;
+    int v = __atomic_load_n(&known, __ATOMIC_RELAXED);
+    if (v >= 0) return v;
+    v = 0;
+    constexpr char key[] = "KAL_RESOURCES=";
+    constexpr okl_uptr key_len = sizeof key - 1;
+    for (char** e = okl::g_envp; e && *e; ++e) {
+        okl_uptr i = 0;
+        while (i < key_len && (*e)[i] == key[i]) ++i;
+        if (i != key_len) continue;
+        const char* val = *e + key_len;
+        auto is = [&](const char* w) {
+            okl_uptr k = 0;
+            while (w[k] && val[k] == w[k]) ++k;
+            return w[k] == '\0' && val[k] == '\0';
+        };
+        v = is("performance") ? 1 : is("economy") ? 2 : 0;
+        break;
+    }
+    __atomic_store_n(&known, v, __ATOMIC_RELAXED);
+    return v;
+}
+}  // namespace okl
+
+namespace {
+// THE ENVIRONMENT'S OWN POLICY FOR MEMORY, AS THE PREFERENCE ASKS (0.23): a
+// program started for economy has no transparent huge pages, which hold a whole
+// two mebibytes resident for the first byte touched. After `capture', which
+// reads the environment.
+[[gnu::constructor(102)]] void apply_resource_preference() {
+    if (okl::resource_preference() == 2)
+        okl::sys(okl::nr_prctl, 41 /* PR_SET_THP_DISABLE */, 1, 0, 0, 0);
+}
+}  // namespace

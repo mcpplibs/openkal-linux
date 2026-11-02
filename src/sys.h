@@ -132,6 +132,13 @@ enum : okl_long {
     // openkal 0.20: transfers at an offset, a range's backing returned, and
     // whether a file may be written by this program (a control group's).
     nr_pread64 = 17, nr_pwrite64 = 18, nr_madvise = 28, nr_faccessat = 269,
+    // openkal 0.23: a part sealed, a listing with attributes, page faults
+    // counted, a fault reported, samples taken, a program confined, and what
+    // memory is available.
+    nr_mseal = 462, nr_statx = 332, nr_getrusage = 98, nr_sigaltstack = 131,
+    nr_setitimer = 38, nr_rt_sigreturn = 15, nr_process_vm_readv = 310,
+    nr_landlock_create_ruleset = 444, nr_landlock_add_rule = 445,
+    nr_landlock_restrict_self = 446, nr_sysinfo = 99,
 };
 
 #elif defined(__aarch64__)
@@ -230,6 +237,11 @@ enum : okl_long {
     nr_rt_sigprocmask = 135,
     // openkal 0.20, as on the other architecture.
     nr_pread64 = 67, nr_pwrite64 = 68, nr_madvise = 233, nr_faccessat = 48,
+    // openkal 0.23, as on the other architecture.
+    nr_mseal = 462, nr_statx = 291, nr_getrusage = 165, nr_sigaltstack = 132,
+    nr_setitimer = 103, nr_rt_sigreturn = 139, nr_process_vm_readv = 270,
+    nr_landlock_create_ruleset = 444, nr_landlock_add_rule = 445,
+    nr_landlock_restrict_self = 446, nr_sysinfo = 179,
 };
 
 #else

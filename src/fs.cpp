@@ -1,11 +1,26 @@
 #include "sys.h"
 #include "handle.h"
+#include "rights.h"
 #include <openkal/fs.h>
 #include <openkal/memory.h>
 
 namespace okl { extern char** g_envp; }
 
 namespace {
+
+// THE RIGHTS OF A DIRECTORY HANDLE (0.23, rights.h): an operation that would
+// change something beneath a read-only handle is refused before it is asked of
+// the kernel; one that did change something is recorded, and what a handle that
+// states nothing changes has listed no longer holds.
+inline bool refused_write(int b) { return (okl::rights::of(b) & okl::rights::read_only) != 0; }
+inline void wrote(int b, const char* n, kal_uintptr l) {
+    if (!okl::rights::g_any) return;
+    okl::rights::changed(b);
+    okl::rights::note(b, 'w', n, l);
+}
+inline void asked(int b, bool present, const char* n, kal_uintptr l) {
+    if (okl::rights::g_any) okl::rights::note(b, present ? 's' : 'a', n, l);
+}
 
 
 // The directories this implementation supplies. A hosted system does not
@@ -42,6 +57,50 @@ constexpr kal_uintptr kMaxGrants = 16;
 //
 // Answers false when there is no such value, which leaves the directories this
 // implementation supplies by default.
+// WHAT A GRANT CARRIES (0.23): the rights and statements of an attenuated
+// handle, its record, and where it lies beneath the directory the record is of,
+// in a second variable a start writes beside the first,
+//
+//     KAL_GRANT_RIGHTS=<pid>{;<index>,<flags>,<record fd or -1>,<len>,<path>}
+//
+// read when this process is `<pid>'. A program built before it ignores it and
+// holds its grants without rights; one started confined is held to them by the
+// kernel in any case (process.cpp).
+void adopt_rights(const preopen* t, kal_uintptr count) {
+    constexpr char key[] = "KAL_GRANT_RIGHTS=";
+    constexpr okl_uptr key_len = sizeof key - 1;
+    const char* v = nullptr;
+    for (char** e = okl::g_envp; e && *e; ++e) {
+        okl_uptr i = 0;
+        while (i < key_len && (*e)[i] == key[i]) ++i;
+        if (i == key_len) { v = *e + key_len; break; }
+    }
+    if (v == nullptr) return;
+    auto number = [&](long& out) {
+        bool neg = false;
+        if (*v == '-') { neg = true; ++v; }
+        if (*v < '0' || *v > '9') return false;
+        out = 0;
+        while (*v >= '0' && *v <= '9') out = out * 10 + (*v++ - '0');
+        if (neg) out = -out;
+        return true;
+    };
+    long pid = 0;
+    if (!number(pid) || pid != okl::sys(okl::nr_getpid)) return;
+    while (*v == ';') {
+        ++v;
+        long index = 0, flags = 0, record = -1, len = 0;
+        if (!number(index) || *v++ != ',' || !number(flags) || *v++ != ',' || !number(record)
+            || *v++ != ',' || !number(len) || *v++ != ',' || len < 0)
+            return;
+        for (long i = 0; i < len; ++i) if (v[i] == '\0') return;
+        if (index >= 0 && static_cast<kal_uintptr>(index) < count && t[index].handle != 0)
+            okl::rights::adopt(okl::unpack(t[index].handle), static_cast<okl_u32>(flags),
+                               static_cast<int>(record), v, static_cast<okl_uptr>(len));
+        v += len;
+    }
+}
+
 bool granted(preopen* t, kal_uintptr* n) {
     constexpr char key[] = "KAL_PREOPENS=";
     constexpr okl_uptr key_len = sizeof key - 1;
@@ -79,6 +138,7 @@ bool granted(preopen* t, kal_uintptr* n) {
     }
     if (*v != '\0') return false;
     *n = k;
+    adopt_rights(t, k);
     return true;
 }
 
@@ -469,9 +529,24 @@ int kal_fs_open_dir(kal_dir base, const char* name, kal_uintptr len, kal_dir* ou
     const int b = okl::unpack(base.h);
     if (b < 0 || out == nullptr || !okl::acceptable(name, len)) return kal_err_invalid;
     okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    const okl_u32 rights = okl::rights::of(b);
+    if ((rights & okl::rights::unchanging) && okl::rights::known_absent(b, name, len)) {
+        asked(b, false, name, len);
+        return kal_err_not_found;
+    }
     const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf),
                                  dir_handle_flags, 0);
-    if (okl::failed(fd)) return okl::translate(fd);
+    if (okl::failed(fd)) {
+        if (rights && (fd == -okl::e_noent || fd == -okl::e_notdir)) asked(b, false, name, len);
+        return okl::translate(fd);
+    }
+    // A directory opened beneath a handle with rights has them; where the table
+    // has no room the directory is not handed out with more than its base.
+    if (rights && !okl::rights::derive(b, static_cast<int>(fd), name, len)) {
+        okl::sys(okl::nr_close, fd);
+        return kal_err_no_memory;
+    }
+    if (rights) asked(b, true, name, len);
     *out = kal_dir{ okl::pack(static_cast<int>(fd)) };
     return kal_ok;
 }
@@ -491,8 +566,23 @@ int kal_fs_open(kal_dir base, const char* name, kal_uintptr len,
     if (flags & KAL_OPEN_TRUNCATE)  f |= okl::o_trunc;
     if (flags & KAL_OPEN_APPEND)    f |= okl::o_append;
 
+    const okl_u32 rights = okl::rights::of(b);
+    const bool changes = (flags & (KAL_OPEN_WRITE | KAL_OPEN_CREATE | KAL_OPEN_TRUNCATE | KAL_OPEN_APPEND)) != 0;
+    if (changes && (rights & okl::rights::read_only)) return kal_err_permission;
+    if (!(flags & KAL_OPEN_CREATE) && (rights & okl::rights::unchanging)
+        && okl::rights::known_absent(b, name, len)) {
+        asked(b, false, name, len);
+        return kal_err_not_found;
+    }
     const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf), f, 0666);
-    if (okl::failed(fd)) return okl::translate(fd);
+    if (okl::failed(fd)) {
+        if (rights && (fd == -okl::e_noent || fd == -okl::e_notdir)) asked(b, false, name, len);
+        return okl::translate(fd);
+    }
+    if (rights) {
+        if (changes) wrote(b, name, len);
+        else okl::rights::note(b, 'r', name, len);
+    }
     *out = kal_file{ okl::pack(static_cast<int>(fd)) };
     return kal_ok;
 }
@@ -503,6 +593,7 @@ void kal_fs_close_dir(kal_dir d) {
     // Before the close, because after it the number may already name another
     // directory whose enumerations are not this one's.
     listings_end(fd);
+    okl::rights::forget(fd);
     okl::retire(d.h); okl::sys(okl::nr_close, fd);
 }
 
@@ -584,6 +675,12 @@ int kal_fs_info(kal_dir base, const char* name, kal_uintptr len,
     const int b = okl::unpack(base.h);
     if (b < 0 || !info_ok(out)) return kal_err_invalid;
     okl::accepted_name t(name, len); if (!t.ok) return kal_err_invalid;
+    const okl_u32 rights = okl::rights::of(b);
+    if ((rights & okl::rights::unchanging) && okl::rights::known_absent(b, name, len)) {
+        asked(b, false, name, len);
+        fill_absent(out);
+        return kal_ok;
+    }
     okl::kstat st{};
     // RESOLVES BY DEFAULT, SO THAT ASKING AND OPENING ANSWER THE SAME QUESTION.
     //
@@ -601,11 +698,13 @@ int kal_fs_info(kal_dir base, const char* name, kal_uintptr len,
         // same answer, because the name still refers to nothing --- and so is a
         // node whose content names something absent, when the enquiry resolves.
         if (r == -okl::e_noent || r == -okl::e_notdir || r == -okl::e_loop) {
+            if (rights) asked(b, false, name, len);
             fill_absent(out);
             return kal_ok;
         }
         return okl::translate(r);
     }
+    if (rights) asked(b, true, name, len);
     fill_info(st, wanted, out, b);
     return kal_ok;
 }
@@ -652,6 +751,7 @@ int kal_fs_set_modified_at(kal_dir base, const char* name, kal_uintptr len,
     const int b = okl::unpack(base.h);
     if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
     okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    if (refused_write(b)) return kal_err_permission;
 
     constexpr okl_i64 utime_omit = 0x3ffffffe;
     okl::ktimespec times[2];
@@ -663,7 +763,9 @@ int kal_fs_set_modified_at(kal_dir base, const char* name, kal_uintptr len,
     const okl_long r = okl::sys(okl::nr_utimensat, b,
                                 reinterpret_cast<okl_long>(t.buf),
                                 reinterpret_cast<okl_long>(times), 0);
-    return okl::failed(r) ? okl::translate(r) : kal_ok;
+    if (okl::failed(r)) return okl::translate(r);
+    wrote(b, name, len);
+    return kal_ok;
 }
 
 // Whether a node may be started, version 0.13. This kernel stores the property
@@ -676,6 +778,7 @@ int kal_fs_set_executable_at(kal_dir base, const char* name, kal_uintptr len,
     if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
     okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
     if ((volume_props(b) & KAL_FS_PROP_EXECUTABLE) == 0) return kal_err_not_supported;
+    if (refused_write(b)) return kal_err_permission;
 
     okl::kstat st{};
     okl_long r = okl::sys(okl::nr_newfstatat, b, reinterpret_cast<okl_long>(t.buf),
@@ -692,29 +795,35 @@ int kal_fs_set_executable_at(kal_dir base, const char* name, kal_uintptr len,
     // Resolves, as the enquiry above did, so the node changed is the node read.
     r = okl::sys(okl::nr_fchmodat, b, reinterpret_cast<okl_long>(t.buf),
                  static_cast<okl_long>(next));
-    return okl::failed(r) ? okl::translate(r) : kal_ok;
+    if (okl::failed(r)) return okl::translate(r);
+    wrote(b, name, len);
+    return kal_ok;
 }
 
 int kal_fs_mkdir(kal_dir base, const char* name, kal_uintptr len) {
     const int b = okl::unpack(base.h);
     if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
     okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    if (refused_write(b)) return kal_err_permission;
     const okl_long r = okl::sys(okl::nr_mkdirat, b, reinterpret_cast<okl_long>(t.buf), 0777);
-    return okl::failed(r) ? okl::translate(r) : kal_ok;
+    if (okl::failed(r)) return okl::translate(r);
+    wrote(b, name, len);
+    return kal_ok;
 }
 
 int kal_fs_remove(kal_dir base, const char* name, kal_uintptr len) {
     const int b = okl::unpack(base.h);
     if (b < 0 || !okl::acceptable(name, len)) return kal_err_invalid;
     okl::terminated t(name, len); if (!t.ok) return kal_err_invalid;
+    if (refused_write(b)) return kal_err_permission;
     okl_long r = okl::sys(okl::nr_unlinkat, b, reinterpret_cast<okl_long>(t.buf), 0);
-    if (!okl::failed(r)) return kal_ok;
+    if (!okl::failed(r)) { wrote(b, name, len); return kal_ok; }
     // One operation removes a name, and the kernel distinguishes two kinds of
     // name where this interface does not.
     if (r == -okl::e_isdir || r == -okl::e_perm) {
         const okl_long d = okl::sys(okl::nr_unlinkat, b, reinterpret_cast<okl_long>(t.buf),
                                     okl::at_removedir);
-        if (!okl::failed(d)) return kal_ok;
+        if (!okl::failed(d)) { wrote(b, name, len); return kal_ok; }
         r = d;
     }
     return okl::translate(r);
@@ -726,9 +835,13 @@ int kal_fs_rename(kal_dir from, const char* a, kal_uintptr alen,
     if (f < 0 || t2 < 0 || !okl::acceptable(a, alen) || !okl::acceptable(b, blen)) return kal_err_invalid;
     okl::terminated ta(a, alen), tb(b, blen);
     if (!ta.ok || !tb.ok) return kal_err_invalid;
+    if (refused_write(f) || refused_write(t2)) return kal_err_permission;
     const okl_long r = okl::sys(okl::nr_renameat, f, reinterpret_cast<okl_long>(ta.buf),
                                 t2, reinterpret_cast<okl_long>(tb.buf));
-    return okl::failed(r) ? okl::translate(r) : kal_ok;
+    if (okl::failed(r)) return okl::translate(r);
+    wrote(f, a, alen);
+    wrote(t2, b, blen);
+    return kal_ok;
 }
 
 // A RENAME THAT DOES NOT REPLACE (0.17) is the kernel's own: `renameat2' with
@@ -746,10 +859,14 @@ int kal_fs_rename_flags(kal_dir from, const char* a, kal_uintptr alen,
     if ((volume_props(t2) & KAL_FS_PROP_RENAME_NO_REPLACE) == 0) return kal_err_not_supported;
     okl::terminated ta(a, alen), tb(b, blen);
     if (!ta.ok || !tb.ok) return kal_err_invalid;
+    if (refused_write(f) || refused_write(t2)) return kal_err_permission;
     const okl_long r = okl::sys(okl::nr_renameat2, f, reinterpret_cast<okl_long>(ta.buf),
                                 t2, reinterpret_cast<okl_long>(tb.buf), 1 /* RENAME_NOREPLACE */);
     if (r == -okl::e_inval || r == -okl::e_nosys) return kal_err_not_supported;
-    return okl::failed(r) ? okl::translate(r) : kal_ok;
+    if (okl::failed(r)) return okl::translate(r);
+    wrote(f, a, alen);
+    wrote(t2, b, blen);
+    return kal_ok;
 }
 
 // Enumeration holds a descriptor of its own, obtained by opening the directory
@@ -768,6 +885,7 @@ int kal_fs_list_begin(kal_dir d, kal_uintptr* iter) {
     s->used = 0; s->pos = 0;
     listings_lock(); s->next = g_listings; g_listings = s; listings_unlock();
     *iter = reinterpret_cast<kal_uintptr>(s);
+    if (okl::rights::g_any) okl::rights::note(fd, 'l', "", 0);
     return kal_ok;
 }
 
@@ -842,7 +960,11 @@ static bool descriptor_names() {
 kal_uintptr kal_fs_props(kal_dir d) {
     const int fd = okl::unpack(d.h);
     if (fd < 0) return 0;
-    return volume_props(fd) | (descriptor_names() ? KAL_FS_PROP_RESOLVED_NAME : 0u);
+    const okl_u32 rights = okl::rights::of(fd);
+    return volume_props(fd) | (descriptor_names() ? KAL_FS_PROP_RESOLVED_NAME : 0u)
+         | KAL_FS_PROP_ATTENUATE
+         | ((rights & okl::rights::read_only) ? KAL_FS_PROP_READ_ONLY : 0u)
+         | ((rights & okl::rights::unchanging) ? KAL_FS_PROP_UNCHANGING : 0u);
 }
 
 // --- exclusion upon a range of a file --------------------------------------
@@ -949,9 +1071,12 @@ int kal_fs_link_create(kal_dir base, const char* name, kal_uintptr len,
     if (b < 0 || !okl::acceptable(name, len) || target == nullptr) return kal_err_invalid;
     okl::terminated n(name, len);        if (!n.ok) return kal_err_invalid;
     okl::terminated tgt(target, target_len); if (!tgt.ok) return kal_err_invalid;
+    if (refused_write(b)) return kal_err_permission;
     const okl_long r = okl::sys(okl::nr_symlinkat, reinterpret_cast<okl_long>(tgt.buf),
                                 b, reinterpret_cast<okl_long>(n.buf));
-    return okl::failed(r) ? okl::translate(r) : kal_ok;
+    if (okl::failed(r)) return okl::translate(r);
+    wrote(b, name, len);
+    return kal_ok;
 }
 
 // THE NAME WITH EVERY LINK FOLLOWED (0.23): the node opened for its path alone
@@ -965,9 +1090,18 @@ kal_intptr kal_fs_resolved_name(kal_dir base, const char* name, kal_uintptr len,
     if (b < 0 || !okl::acceptable(name, len)) return -kal_err_invalid;
     if (!descriptor_names()) return -kal_err_not_supported;
     okl::terminated t(name, len); if (!t.ok) return -kal_err_invalid;
+    const okl_u32 rights = okl::rights::of(b);
+    if ((rights & okl::rights::unchanging) && okl::rights::known_absent(b, name, len)) {
+        asked(b, false, name, len);
+        return -kal_err_not_found;
+    }
     const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf),
                                  okl::o_path | okl::o_cloexec, 0);
-    if (okl::failed(fd)) return -okl::translate(fd);
+    if (okl::failed(fd)) {
+        if (rights && (fd == -okl::e_noent || fd == -okl::e_notdir)) asked(b, false, name, len);
+        return -okl::translate(fd);
+    }
+    if (rights) asked(b, true, name, len);
     char link[32] = "/proc/self/fd/";
     {
         okl_uptr at = 14;
@@ -1014,6 +1148,67 @@ kal_intptr kal_fs_link_read(kal_dir base, const char* name, kal_uintptr len,
         if (!okl::failed(full)) r = full;
     }
     return static_cast<kal_intptr>(r);
+}
+
+// THE LISTING WITH WHAT IT TOLD OF THE ENTRY (0.23). This kernel's listing
+// gives a name and a kind and nothing else, so a field beyond the kind is asked
+// of the entry itself --- the same request a caller would make, made here so
+// that the caller crosses this interface once. KAL_FS_PROP_LIST_INFO is not
+// claimed: the listing does not carry the attributes.
+int kal_fs_list_next_info(kal_dir d, kal_uintptr* iter, char* name_out, kal_uintptr name_cap,
+                          kal_uintptr* name_len, kal_u32 wanted, kal_node_info* info) {
+    if (!info_ok(info)) return kal_err_invalid;
+    char own[okl::max_name + 1];
+    kal_uintptr n = 0;
+    int kind = 0;
+    const int e = kal_fs_list_next(d, iter, own, sizeof own - 1, &n, &kind);
+    if (e != kal_ok) return e;
+    if (name_len) *name_len = n;
+    if (name_out && name_cap) okl::copy(name_out, own, n < name_cap ? n : name_cap);
+    const kal_u32 self = info->self_size;
+    if (*iter == 0 && n == 0) { fill_absent(info); return kal_ok; }
+    own[n < sizeof own ? n : sizeof own - 1] = '\0';
+    kal_node_info v{};
+    v.self_size = self;
+    v.kind = kind;
+    v.present = KAL_INFO_KIND;
+    if ((wanted & ~KAL_INFO_KIND) != 0) {
+        okl::kstat st{};
+        const int fd = okl::unpack(d.h);
+        if (!okl::failed(okl::sys(okl::nr_newfstatat, fd, reinterpret_cast<okl_long>(own),
+                                  reinterpret_cast<okl_long>(&st), okl::at_symlink_nofollow))) {
+            v.self_size = self;
+            fill_info(st, wanted, &v, fd);
+            v.kind = kind;
+            v.present &= (wanted | KAL_INFO_KIND);
+        }
+    }
+    if (self >= sizeof v) { *info = v; info->self_size = self; }
+    else okl::copy(reinterpret_cast<char*>(info), reinterpret_cast<const char*>(&v), self);
+    return kal_ok;
+}
+
+// A HANDLE WITH LESS (0.23, rights.h).
+int kal_fs_dir_attenuate(kal_dir d, const kal_dir_rights* rights, kal_dir* out) {
+    const int fd = okl::unpack(d.h);
+    if (fd < 0 || rights == nullptr || out == nullptr) return kal_err_invalid;
+    if (rights->self_size < __builtin_offsetof(kal_dir_rights, record)) return kal_err_invalid;
+    constexpr kal_uintptr known = KAL_DIR_READ_ONLY | KAL_DIR_UNCHANGING | KAL_DIR_RECORDED;
+    if ((rights->flags & ~known) != 0) return kal_err_invalid;
+    int record = -1;
+    if (rights->flags & KAL_DIR_RECORDED) {
+        if (rights->self_size < sizeof(kal_dir_rights)) return kal_err_invalid;
+        record = okl::unpack(rights->record.h);
+        if (record < 0) return kal_err_invalid;
+        // Opened for writing: the record is appended to, not read.
+        const okl_long fl = okl::sys(okl::nr_fcntl, record, 3 /* F_GETFL */);
+        if (okl::failed(fl) || (fl & 3) == okl::o_rdonly) return kal_err_invalid;
+    }
+    int nfd = -1;
+    const int e = okl::rights::attenuate(fd, static_cast<okl_u32>(rights->flags), record, &nfd);
+    if (e != kal_ok) return e;
+    *out = kal_dir{ okl::pack(nfd) };
+    return kal_ok;
 }
 
 }

@@ -109,6 +109,33 @@ stacks and is what a program above openkal would ask for itself.
 before 4.17 reads the flag as a hint, so a mapping placed elsewhere is released
 and the request refused. `KAL_EXEC_PROP_PLACE` is claimed.
 
+**A part sealed, a part read in.** `kal_exec_seal_part` is `mprotect` to read
+only, and `mseal` for `KAL_EXEC_SEAL_FOREVER` where the kernel has it (6.10;
+`KAL_EXEC_PROP_SEAL_FOREVER` is claimed by asking it once). `KAL_EXEC_MAP_PREFETCH`
+is `MAP_POPULATE`; `KAL_EXEC_MAP_BTI` is `PROT_BTI` on arm64, claimed where the
+kernel accepts it.
+
+**A handle with less** (`kal_fs_dir_attenuate`): a table indexed by descriptor,
+consulted by every operation of `openkal.fs` that takes a directory and empty in
+a program that attenuates nothing. A read-only handle refuses every change; one
+that states nothing changes answers absence from a listing it has read, within
+a budget the resource preference sets; a recorded one appends `<kind><name>\0`
+to its record in batches, and `e\0` at `kal_exit` or the C library's
+destructors. A grant carries its rights in `KAL_GRANT_RIGHTS`, and its record
+as a descriptor after the grants.
+
+**Confinement** (`KAL_SPAWN_CONFINE`, `KAL_PROCESS_PROP_CONFINE`): Landlock, at
+the ABI version the kernel reports, set in the started image before it is
+replaced. The grants are the rules, by their rights; the program's own file,
+`/proc` and `/dev/null` are added, and `PR_SET_NO_NEW_PRIVS` is set.
+
+**Observation.** A fault is reported on an alternate stack from
+`/proc/self/maps` and the ELF symbol tables, and the program is then ended as
+the kernel ends it. Samples are `ITIMER_PROF` and `SIGPROF` into a ring a
+handler writes without a lock. `kal_process_info` reports minor and major
+faults (`getrusage`, `/proc/<pid>/stat`). `kal_memory_info` is `MemAvailable`
+within the cgroup's `memory.max`; economy sets `PR_SET_THP_DISABLE`.
+
 ## What 0.23 adds (openkal 0.22)
 
 **The null device at a position.** `KAL_SPAWN_NULL_IN`, `KAL_SPAWN_NULL_OUT` and

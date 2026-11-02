@@ -94,6 +94,94 @@ void* carve(int c) {
     return b;
 }
 
+// --- what the environment can give (0.23) ---------------------------------
+
+// The whole of a small file of the kernel's, into `b'; its length, or 0.
+okl_uptr read_small(const char* path, char* b, okl_uptr cap) {
+    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+                                 okl::o_rdonly | okl::o_cloexec, 0);
+    if (okl::failed(fd)) return 0;
+    okl_uptr n = 0;
+    while (n + 1 < cap) {
+        const okl_long r = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(b + n),
+                                    static_cast<okl_long>(cap - 1 - n));
+        if (r == -okl::e_intr) continue;
+        if (r <= 0) break;
+        n += static_cast<okl_uptr>(r);
+    }
+    okl::sys(okl::nr_close, fd);
+    b[n] = '\0';
+    return n;
+}
+
+// The number after `key' in `b' (a line `key:   123 kB'), in bytes when the
+// line says kB; false where it is absent.
+bool field_bytes(const char* b, const char* key, okl_u64& out) {
+    for (const char* p = b; *p; ) {
+        const char* k = key; const char* q = p;
+        while (*k && *q == *k) { ++q; ++k; }
+        if (*k == '\0' && *q == ':') {
+            ++q; while (*q == ' ' || *q == '\t') ++q;
+            okl_u64 v = 0; bool any = false;
+            while (*q >= '0' && *q <= '9') { v = v * 10 + static_cast<okl_u64>(*q++ - '0'); any = true; }
+            while (*q == ' ') ++q;
+            if (q[0] == 'k' && q[1] == 'B') v *= 1024;
+            out = v;
+            return any;
+        }
+        while (*p && *p != '\n') ++p;
+        if (*p) ++p;
+    }
+    return false;
+}
+
+bool read_meminfo(okl_u64& total, okl_u64& available) {
+    char b[4096];
+    if (read_small("/proc/meminfo", b, sizeof b) == 0) return false;
+    if (!field_bytes(b, "MemTotal", total)) return false;
+    if (!field_bytes(b, "MemAvailable", available)) {
+        okl_u64 free = 0, cached = 0;
+        field_bytes(b, "MemFree", free);
+        field_bytes(b, "Cached", cached);
+        available = free + cached;
+    }
+    return true;
+}
+
+// The limit of the cgroup-v2 group this program is in, and its use; false
+// where there is none (`max', no unified hierarchy, or it cannot be read).
+bool group_limit(okl_u64& limit, okl_u64& used) {
+    char cg[1024];
+    const okl_uptr n = read_small("/proc/self/cgroup", cg, sizeof cg);
+    if (n == 0) return false;
+    // The unified hierarchy's line: `0::<path>'.
+    const char* path = nullptr;
+    for (const char* p = cg; *p; ) {
+        if (p[0] == '0' && p[1] == ':' && p[2] == ':') { path = p + 3; break; }
+        while (*p && *p != '\n') ++p;
+        if (*p) ++p;
+    }
+    if (!path) return false;
+    char file[1200] = "/sys/fs/cgroup";
+    okl_uptr o = 14;
+    for (const char* p = path; *p && *p != '\n' && o + 20 < sizeof file; ++p) file[o++] = *p;
+    if (o > 0 && file[o - 1] == '/') --o;
+    auto value = [&](const char* leaf, okl_u64& out) {
+        okl_uptr k = o;
+        for (const char* l = leaf; *l && k + 1 < sizeof file; ++l) file[k++] = *l;
+        file[k] = '\0';
+        char b[64];
+        if (read_small(file, b, sizeof b) == 0 || b[0] < '0' || b[0] > '9') return false;
+        okl_u64 v = 0;
+        for (const char* q = b; *q >= '0' && *q <= '9'; ++q) v = v * 10 + static_cast<okl_u64>(*q - '0');
+        out = v;
+        return true;
+    };
+    if (!value("/memory.max", limit)) return false;
+    if (!value("/memory.current", used)) used = 0;
+    return true;
+}
+
 }  // namespace
 
 extern "C" {
@@ -178,6 +266,31 @@ void kal_free(void* p, kal_uintptr size, kal_uintptr align) {
 kal_uintptr kal_memory_granularity(void) {
     const okl_ulong page = okl::auxval(6 /* AT_PAGESZ */);
     return page != 0 ? static_cast<kal_uintptr>(page) : kPage;
+}
+
+// WHAT THE ENVIRONMENT CAN GIVE (0.23): the machine's memory and what the
+// kernel estimates it can give without taking any from another program
+// (MemTotal, MemAvailable), each bounded by the limit of the control group the
+// program is in, and what that group already uses.
+int kal_memory_info(kal_memory_status* out) {
+    if (out == nullptr || out->self_size < 2 * sizeof(kal_u32)) return kal_err_invalid;
+    const kal_u32 self = out->self_size;
+    kal_memory_status v{};
+    v.self_size = self;
+    okl_u64 total = 0, available = 0;
+    if (read_meminfo(total, available)) v.present = KAL_MSTATUS_TOTAL | KAL_MSTATUS_AVAILABLE;
+    okl_u64 limit = 0, used = 0;
+    if (group_limit(limit, used)) {
+        if (limit < total || total == 0) total = limit;
+        const okl_u64 room = limit > used ? limit - used : 0;
+        if (room < available || !(v.present & KAL_MSTATUS_AVAILABLE)) available = room;
+        v.present = KAL_MSTATUS_TOTAL | KAL_MSTATUS_AVAILABLE;
+    }
+    v.total_bytes = total;
+    v.available_bytes = available < total ? available : total;
+    const kal_u32 n = self < sizeof v ? self : static_cast<kal_u32>(sizeof v);
+    okl::copy(reinterpret_cast<char*>(out), reinterpret_cast<const char*>(&v), n);
+    return kal_ok;
 }
 
 }

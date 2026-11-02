@@ -1,4 +1,5 @@
 #include "sys.h"
+#include "rights.h"
 #include <openkal/abort.h>
 
 extern "C" {
@@ -20,6 +21,9 @@ extern "C" {
 // destructors first --- is not observable in a small program and is observable
 // in a large one, which is why it is stated rather than left to judgement.
 [[noreturn]] void kal_exit(int code) {
+    // What the program's attenuated handles recorded is written, and ended
+    // (0.23, fs.h): a record without its end is of a program that did not end.
+    okl::rights::end_of_program();
     for (;;) okl::sys(okl::nr_exit_group, code);
 }
 
