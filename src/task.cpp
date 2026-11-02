@@ -82,9 +82,16 @@ __asm__(
 );
 #endif
 
-// In both arrangements: a program is started by it as well (process.cpp).
+// In both arrangements: a program is started by it as well (process.cpp,
+// through okl::clone_on_stack below).
 extern "C" okl_long __okl_clone(int (*fn)(void*), void* stack, int flags, void* arg,
                                 int* ptid, void* tls, int* ctid);
+
+namespace okl {
+okl_long clone_on_stack(int (*fn)(void*), void* stack, int flags, void* arg) {
+    return __okl_clone(fn, stack, flags, arg, nullptr, nullptr, nullptr);
+}
+}  // namespace okl
 
 #ifndef OKL_STANDALONE
 // THE HOST'S OWN ENQUIRY, WHICH IS A NAME THIS IMPLEMENTATION MAY TAKE IN THIS

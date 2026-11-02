@@ -6,8 +6,7 @@
 
 namespace okl { extern char** g_envp; extern bool g_pipe_started_ignored; okl_ulong auxval(okl_ulong key); }
 // The transfer to a function on a stack of its own (task.cpp).
-extern "C" okl_long __okl_clone(int (*fn)(void*), void* stack, int flags, void* arg,
-                                int* ptid, void* tls, int* ctid);
+namespace okl { okl_long clone_on_stack(int (*fn)(void*), void* stack, int flags, void* arg); }
 // Defined with what a unit uses, below (0.21).
 namespace okl {
 int child_outcome(okl_long pid, bool block, int* status, int* terminated, bool& ended);
@@ -813,9 +812,9 @@ int kal_process_spawn(const kal_spawn* how,
                                     okl::map_private | okl::map_anonymous, -1, 0);
     const okl_long child = okl::failed(stack)
         ? stack
-        : __okl_clone(&start_image, reinterpret_cast<char*>(stack) + kStartStack,
-                      0x100 /* CLONE_VM */ | 0x4000 /* CLONE_VFORK */ | 17 /* SIGCHLD */,
-                      const_cast<start_plan*>(&plan), nullptr, nullptr, nullptr);
+        : okl::clone_on_stack(&start_image, reinterpret_cast<char*>(stack) + kStartStack,
+                              0x100 /* CLONE_VM */ | 0x4000 /* CLONE_VFORK */ | 17 /* SIGCHLD */,
+                              const_cast<start_plan*>(&plan));
     okl::sys(okl::nr_rt_sigprocmask, 2 /* SIG_SETMASK */, reinterpret_cast<okl_long>(&caller_mask), 0,
              sizeof caller_mask);
     if (!okl::failed(stack)) okl::sys(okl::nr_munmap, stack, static_cast<okl_long>(kStartStack));
