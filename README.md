@@ -132,7 +132,10 @@ replaced. The grants are the rules, by their rights; the program's own file,
 **Observation.** A fault is reported on an alternate stack from
 `/proc/self/maps` and the ELF symbol tables, and the program is then ended as
 the kernel ends it. Samples are `ITIMER_PROF` and `SIGPROF` into a ring a
-handler writes without a lock. `kal_process_info` reports minor and major
+handler writes without a lock. Touches: a part recorded is made readable and
+not executable, and the handler makes each page executable again at its first
+execution and records it; a fault that is not a touch is reported, or passed
+to the program's own handler. `kal_process_info` reports minor and major
 faults (`getrusage`, `/proc/<pid>/stat`). `kal_memory_info` is `MemAvailable`
 within the cgroup's `memory.max`; economy sets `PR_SET_THP_DISABLE`.
 

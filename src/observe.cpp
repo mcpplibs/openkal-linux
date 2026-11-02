@@ -11,6 +11,7 @@
 #include "sys.h"
 #include "rights.h"
 #include <openkal/debug.h>
+#include <openkal/exec.h>
 #include <openkal/prof.h>
 #include <openkal/task.h>
 
@@ -288,9 +289,11 @@ constexpr unsigned long sa_siginfo = 4, sa_onstack = 0x08000000, sa_restorer = 0
 alignas(16) unsigned char g_alt_stack[256 * 1024];
 
 // INSTALLED AT INCEPTION, for every program of this implementation, on a stack
-// of its own so that a program that exhausted its stack is still reported. The
-// handler is the default again once it has run (SA_RESETHAND), so the fault
-// repeats and the program ends as the kernel ends it, its core kept.
+// of its own so that a program that exhausted its stack is still reported.
+// Having reported, the handler gives the signal its default disposition again,
+// so the fault repeats and the program ends as the kernel ends it, its core
+// kept. It is not reset on entry (SA_RESETHAND): a fault that is a touch being
+// recorded (below) is the handler's to resolve, and the program continues.
 [[gnu::constructor(103)]] void install_fault_report() {
     struct { void* sp; int flags; okl_uptr size; } ss{ g_alt_stack, 0, sizeof g_alt_stack };
     okl::sys(okl::nr_sigaltstack, reinterpret_cast<okl_long>(&ss), 0);
@@ -303,10 +306,124 @@ alignas(16) unsigned char g_alt_stack[256 * 1024];
         // is the program's to keep.
         if (old.handler != nullptr) continue;
         k_sigaction act{ reinterpret_cast<void*>(&okl_fault_handler),
-                         sa_siginfo | sa_onstack | sa_resethand | sa_restorer,
+                         sa_siginfo | sa_onstack | sa_restorer,
                          reinterpret_cast<void*>(&okl_signal_return), 0 };
         okl::sys(okl::nr_rt_sigaction, signo, reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
     }
+}
+
+// --- touches (0.23) ------------------------------------------------------------------
+//
+// A part being recorded is made readable and not executable: its first
+// execution of a page is a fault the handler resolves --- the page made
+// executable again, its address recorded once --- and the instruction is
+// carried out. Only executing faults: a read of the part, the kernel's
+// included, proceeds as it did.
+struct touched_part {
+    okl_uptr from = 0, to = 0;
+    int prot = 0;
+    volatile unsigned char* seen = nullptr;   // a bit for each page
+    okl_uptr seen_bytes = 0;
+};
+constexpr int kTouchedParts = 16;
+touched_part g_parts[kTouchedParts];
+volatile int g_part_count = 0;
+volatile int g_touching = 0;
+okl_uptr g_touch_page = 4096;
+
+struct touch_ring {
+    okl_uptr* pages = nullptr;
+    volatile okl_uptr* ready = nullptr;
+    okl_uptr cap = 0;
+    volatile okl_uptr written = 0, taken = 0;
+};
+touch_ring g_touches;
+
+// The disposition of SIGSEGV before touches were recorded, where it was not
+// this handler's: a fault that is not a touch is the program's.
+k_sigaction g_segv_before{};
+bool g_segv_replaced = false;
+
+// The protection of the pages of [from, to) from /proc/self/maps: one for all
+// of them, or -1.
+int protection_of(okl_uptr from, okl_uptr to) {
+    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>("/proc/self/maps"),
+                                 okl::o_rdonly | okl::o_cloexec, 0);
+    if (okl::failed(fd)) return -1;
+    char buf[4096], ln[1024];
+    okl_uptr ll = 0, covered = from;
+    int prot = -2;
+    bool done = false;
+    for (;;) {
+        const okl_long r = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(buf), sizeof buf);
+        if (r == -okl::e_intr) continue;
+        if (r <= 0) break;
+        for (okl_long i = 0; i < r && !done; ++i) {
+            if (buf[i] != '\n') { if (ll + 1 < sizeof ln) ln[ll++] = buf[i]; continue; }
+            ln[ll] = '\0';
+            ll = 0;
+            const char* p = ln;
+            const okl_uptr lo = parse_hex(p);
+            if (*p == '-') ++p;
+            const okl_uptr hi = parse_hex(p);
+            if (hi <= covered || lo >= to) continue;
+            if (lo > covered) { prot = -1; done = true; break; }   // a hole
+            while (*p == ' ') ++p;
+            const int here = (p[0] == 'r' ? okl::prot_read : 0) | (p[1] == 'w' ? okl::prot_write : 0)
+                           | (p[2] == 'x' ? okl::prot_exec : 0);
+            if (prot == -2) prot = here; else if (prot != here) { prot = -1; done = true; break; }
+            covered = hi;
+            if (covered >= to) { done = true; break; }
+        }
+        if (done) break;
+    }
+    okl::sys(okl::nr_close, fd);
+    return covered >= to ? prot : -1;
+}
+
+// A touch, from the handler: true when the fault was one and is resolved.
+bool touched(int signo, const siginfo_head* si) {
+    if (signo != 11 || !__atomic_load_n(&g_touching, __ATOMIC_ACQUIRE) || si == nullptr) return false;
+    const okl_uptr addr = si->addr;
+    const int n = __atomic_load_n(&g_part_count, __ATOMIC_ACQUIRE);
+    for (int k = 0; k < n; ++k) {
+        touched_part& t = g_parts[k];
+        if (addr < t.from || addr >= t.to) continue;
+        const okl_uptr page = addr & ~(g_touch_page - 1);
+        const okl_uptr index = (page - t.from) / g_touch_page;
+        const unsigned char bit = static_cast<unsigned char>(1u << (index & 7));
+        const unsigned char was = __atomic_fetch_or(&t.seen[index >> 3], bit, __ATOMIC_ACQ_REL);
+        // The page executable again before the instruction is retried; a
+        // second context that met it at once finds the bit and only retries.
+        okl::sys(okl::nr_mprotect, static_cast<okl_long>(page), static_cast<okl_long>(g_touch_page), t.prot);
+        if (!(was & bit) && g_touches.pages) {
+            const okl_uptr mine = __atomic_fetch_add(&g_touches.written, 1, __ATOMIC_ACQ_REL);
+            if (mine - __atomic_load_n(&g_touches.taken, __ATOMIC_ACQUIRE) < g_touches.cap) {
+                g_touches.pages[mine % g_touches.cap] = page;
+                __atomic_store_n(&g_touches.ready[mine % g_touches.cap], mine + 1, __ATOMIC_RELEASE);
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+void fault(int signo, void* info, void* uc) {
+    if (touched(signo, static_cast<const siginfo_head*>(info))) return;
+    // A fault that is not a touch, met while SIGSEGV was the program's: the
+    // program's handler, as the program installed it.
+    if (signo == 11 && g_segv_replaced && g_segv_before.handler != nullptr
+        && g_segv_before.handler != reinterpret_cast<void*>(1)) {
+        if (g_segv_before.flags & sa_siginfo)
+            reinterpret_cast<void (*)(int, void*, void*)>(g_segv_before.handler)(signo, info, uc);
+        else
+            reinterpret_cast<void (*)(int)>(g_segv_before.handler)(signo);
+        return;
+    }
+    report(signo, info, uc);
+    // The default disposition, and the fault repeats as the kernel's.
+    k_sigaction standard{};
+    okl::sys(okl::nr_rt_sigaction, signo, reinterpret_cast<okl_long>(&standard), 0, sizeof standard.mask);
 }
 
 // --- samples -----------------------------------------------------------------------
@@ -349,7 +466,7 @@ k_sigaction g_prof_before{};
 
 }  // namespace
 
-extern "C" void okl_fault_handler(int signo, void* info, void* uc) { report(signo, info, uc); }
+extern "C" void okl_fault_handler(int signo, void* info, void* uc) { fault(signo, info, uc); }
 extern "C" void okl_sample_handler(int, void*, void* uc) { sample(uc); }
 
 extern "C" {
@@ -379,7 +496,7 @@ int  kal_prof_active(void) { return 0; }
 int  kal_prof_counter(const char*, kal_uintptr, const volatile kal_u64*) { return kal_ok; }
 void kal_prof_mark(const char*, kal_uintptr, int) {}
 
-kal_uintptr kal_prof_props(void) { return KAL_PROF_PROP_SAMPLES; }
+kal_uintptr kal_prof_props(void) { return KAL_PROF_PROP_SAMPLES | KAL_PROF_PROP_TOUCHES; }
 
 // SAMPLES: the processor-time timer of the whole program (ITIMER_PROF), whose
 // signal the kernel delivers to the context that is using the time, and the
@@ -434,6 +551,81 @@ int kal_prof_sample_end(void) {
     okl::sys(okl::nr_setitimer, 2, reinterpret_cast<okl_long>(&stop), 0);
     __atomic_store_n(&g_ring.on, 0, __ATOMIC_RELEASE);
     okl::sys(okl::nr_rt_sigaction, 27, reinterpret_cast<okl_long>(&g_prof_before), 0, sizeof g_prof_before.mask);
+    return kal_ok;
+}
+
+// TOUCHES (0.23).
+int kal_prof_touch_begin(const void* at, kal_uintptr size) {
+    const okl_uptr g = kal_exec_granularity();
+    const okl_uptr from = reinterpret_cast<okl_uptr>(at);
+    if (size == 0 || (from & (g - 1)) != 0 || (size & (g - 1)) != 0) return kal_err_invalid;
+    const int prot = protection_of(from, from + size);
+    if (prot < 0 || !(prot & okl::prot_exec)) return kal_err_invalid;
+    if (__atomic_load_n(&g_part_count, __ATOMIC_ACQUIRE) == kTouchedParts) return kal_err_no_memory;
+    g_touch_page = g;
+    if (!g_touches.pages) {
+        constexpr okl_uptr cap = 65536;
+        const okl_long m = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(cap * 2 * sizeof(okl_uptr)),
+                                    okl::prot_read | okl::prot_write, okl::map_private | okl::map_anonymous, -1, 0);
+        if (okl::failed(m)) return kal_err_no_memory;
+        g_touches.pages = reinterpret_cast<okl_uptr*>(m);
+        g_touches.ready = reinterpret_cast<volatile okl_uptr*>(m + static_cast<okl_long>(cap * sizeof(okl_uptr)));
+        g_touches.cap = cap;
+    }
+    const okl_uptr bits = (size / g + 7) / 8;
+    const okl_long b = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(bits), okl::prot_read | okl::prot_write,
+                                okl::map_private | okl::map_anonymous, -1, 0);
+    if (okl::failed(b)) return kal_err_no_memory;
+    // The handler resolves the touches, whoever holds SIGSEGV.
+    k_sigaction now{};
+    okl::sys(okl::nr_rt_sigaction, 11, 0, reinterpret_cast<okl_long>(&now), sizeof now.mask);
+    if (now.handler != reinterpret_cast<void*>(&okl_fault_handler)) {
+        g_segv_before = now;
+        g_segv_replaced = true;
+        k_sigaction act{ reinterpret_cast<void*>(&okl_fault_handler), sa_siginfo | sa_onstack | sa_restorer,
+                         reinterpret_cast<void*>(&okl_signal_return), 0 };
+        okl::sys(okl::nr_rt_sigaction, 11, reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
+    }
+    const int k = __atomic_load_n(&g_part_count, __ATOMIC_ACQUIRE);
+    g_parts[k] = touched_part{ from, from + size, prot, reinterpret_cast<volatile unsigned char*>(b), bits };
+    __atomic_store_n(&g_part_count, k + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_touching, 1, __ATOMIC_RELEASE);
+    const okl_long r = okl::sys(okl::nr_mprotect, static_cast<okl_long>(from), static_cast<okl_long>(size),
+                                prot & ~okl::prot_exec);
+    if (okl::failed(r)) {
+        __atomic_store_n(&g_part_count, k, __ATOMIC_RELEASE);
+        return okl::translate(r);
+    }
+    return kal_ok;
+}
+
+kal_intptr kal_prof_touch_take(kal_uintptr* out, kal_uintptr count) {
+    if (out == nullptr && count != 0) return -static_cast<kal_intptr>(kal_err_invalid);
+    if (!g_touches.pages) return 0;
+    kal_uintptr n = 0;
+    while (n < count) {
+        const okl_uptr t = __atomic_load_n(&g_touches.taken, __ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g_touches.ready[t % g_touches.cap], __ATOMIC_ACQUIRE) != t + 1) break;
+        out[n++] = g_touches.pages[t % g_touches.cap];
+        __atomic_store_n(&g_touches.taken, t + 1, __ATOMIC_RELEASE);
+    }
+    return static_cast<kal_intptr>(n);
+}
+
+// Every part as it was; the pages' bits stay for the life of the program (a
+// context may still be in the handler with them).
+int kal_prof_touch_end(void) {
+    const int n = __atomic_load_n(&g_part_count, __ATOMIC_ACQUIRE);
+    if (n == 0) return kal_err_invalid;
+    for (int k = 0; k < n; ++k)
+        okl::sys(okl::nr_mprotect, static_cast<okl_long>(g_parts[k].from),
+                 static_cast<okl_long>(g_parts[k].to - g_parts[k].from), g_parts[k].prot);
+    __atomic_store_n(&g_touching, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_part_count, 0, __ATOMIC_RELEASE);
+    if (g_segv_replaced) {
+        okl::sys(okl::nr_rt_sigaction, 11, reinterpret_cast<okl_long>(&g_segv_before), 0, sizeof g_segv_before.mask);
+        g_segv_replaced = false;
+    }
     return kal_ok;
 }
 
