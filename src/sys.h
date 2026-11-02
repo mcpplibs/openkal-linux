@@ -680,4 +680,28 @@ struct terminated {
     }
 };
 
+// A name `acceptable' accepts, terminated for the kernel, in one pass over it:
+// the operations a program makes most often (an enquiry, an open) read each
+// name once rather than twice (0.22).
+struct accepted_name {
+    char buf[max_name + 1];
+    bool ok = false;
+    accepted_name(const char* name, okl_uptr len) {
+        if (name == nullptr || len == 0 || len >= sizeof buf || name[0] == '/') return;
+        okl_uptr start = 0;
+        for (okl_uptr i = 0; i < len; ++i) {
+            const char c = name[i];
+            buf[i] = c;
+            if (c != '/') continue;
+            const okl_uptr n = i - start;
+            if (n == 0 || (n == 2 && name[start] == '.' && name[start + 1] == '.')) return;
+            start = i + 1;
+        }
+        const okl_uptr n = len - start;
+        if (n == 0 || (n == 2 && name[start] == '.' && name[start + 1] == '.')) return;
+        buf[len] = '\0';
+        ok = true;
+    }
+};
+
 }  // namespace okl

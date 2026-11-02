@@ -5,10 +5,10 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.20.0"
+openkal = "0.21.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.21.0"
+openkal-linux = "0.22.0"
 ```
 
 ## Why it does not use a C library
@@ -101,6 +101,38 @@ plus 256 pages.
 A program that carries a runtime of its own answers from that runtime instead
 (`pthread_getattr_np`), because in that arrangement the runtime is what owns the
 stacks and is what a program above openkal would ask for itself.
+
+## What 0.22 adds (openkal 0.21)
+
+**Instructions from a file.** `kal_exec_map_part` maps the file's pages over part
+of a region (`mmap` with `MAP_FIXED`, private), read, or read and executed;
+`KAL_EXEC_PROP_FILE` is claimed. A volume mounted without execution reports
+`kal_err_not_supported`.
+
+**An ended program's processor time.** `kal_process_info` reports `cpu_ns` of a
+started program that has ended from the same record as its peak memory
+(`waitid(WNOWAIT)`'s usage), until `kal_process_close` collects it.
+
+**A program is started without copying this one.** `kal_process_spawn` starts the
+program with `clone(CLONE_VM | CLONE_VFORK)` on a stack of its own, as a C
+library's `posix_spawn` does, and every request is held until it is replaced; the
+started image sets each handled request to its default before it takes the
+caller's mask. A copy of the address space (`clone` with `SIGCHLD` alone) copied
+the page tables of the whole program and made each page it wrote afterwards fault
+again: 1.4 ms in the kernel and about 1 900 faults for each worker a language
+server started.
+
+**An enquiry and an open read the name once.** `kal_fs_info` and `kal_fs_open`
+check the name and terminate it for the kernel in one pass, the volume each
+enquiry asks about is read without a lock (a sequence read before and after the
+slots), and the answer is written straight into the caller's structure: what an
+enquiry costs beyond the kernel's own fell from 28 ns to 19 ns.
+
+**A chunk of `kal_alloc` is carved as it is used.** A free list threaded through
+each 1 MiB chunk when it was mapped made the whole chunk resident; six classes in
+use made 6 MiB resident in every program. A block is now carved when it is
+handed out. An alignment wider than 4096 bytes is mapped, as a block of a class
+is aligned only to its size or to the page.
 
 ## What 0.21 adds (openkal 0.20)
 
