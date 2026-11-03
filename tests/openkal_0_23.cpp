@@ -6,11 +6,13 @@
 // is refused by Landlock where the kernel has it. A PREFERENCE FOR ECONOMY
 // turns the program's transparent huge pages off.
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <fcntl.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <unistd.h>
 import openkal.types;
 import openkal.env;
@@ -35,13 +37,14 @@ kal_dir root() {
 char g_self[4096];
 char g_dir[] = "/tmp/okl-0.24-XXXXXX";
 
-int start(const char* errand, const kal_preopen* grants, kal_uintptr n, kal_uintptr flags) {
+int start(const char* errand, const kal_preopen* grants, kal_uintptr n, kal_uintptr flags,
+          const char* operand = nullptr) {
     const kal_dir r = root();
-    const char* args[] = { g_self, errand };
-    const kal_uintptr lens[] = { std::strlen(g_self), std::strlen(errand) };
+    const char* args[] = { g_self, errand, operand };
+    const kal_uintptr lens[] = { std::strlen(g_self), std::strlen(errand), operand ? std::strlen(operand) : 0 };
     const kal_spawn how{ r, r, nullptr, grants, n, flags };
     kal_process p{};
-    if (kal_process_spawn(&how, g_self + 1, std::strlen(g_self + 1), args, lens, 2, nullptr, nullptr, 0,
+    if (kal_process_spawn(&how, g_self + 1, std::strlen(g_self + 1), args, lens, operand ? 3 : 2, nullptr, nullptr, 0,
                           nullptr, &p) != kal_ok)
         return -1;
     int status = -1, terminated = 0;
@@ -75,6 +78,30 @@ int main(int argc, char** argv) {
     }
     if (argc > 1 && std::strcmp(argv[1], "--thp") == 0)
         return static_cast<int>(::prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0)) == 1 ? 70 : 71;
+    if (argc == 3 && (std::strcmp(argv[1], "--truncate-raw") == 0 ||
+                      std::strcmp(argv[1], "--open-truncate-raw") == 0)) {
+        // Prove the existing file is readable before asking the kernel to
+        // truncate it. Missing files and unreachable grants are not proof.
+        const int readable = static_cast<int>(::syscall(SYS_openat, AT_FDCWD, argv[2], O_RDONLY));
+        if (readable < 0) return 66;
+        ::close(readable);
+        errno = 0;
+        const long result = std::strcmp(argv[1], "--truncate-raw") == 0
+            ? ::syscall(SYS_truncate, argv[2], 0)
+            : ::syscall(SYS_openat, AT_FDCWD, argv[2], O_RDONLY | O_TRUNC);
+        const int why = errno;
+        if (result >= 0) {
+            if (std::strcmp(argv[1], "--open-truncate-raw") == 0) ::close(static_cast<int>(result));
+            return 64;
+        }
+        return why == EACCES ? 63 : 65;
+    }
+
+    // The pinned compiler's Linux headers can predate Landlock. This syscall
+    // has number 444 on both architectures this implementation builds for.
+    const long landlock = ::syscall(444, nullptr, 0, 1 /* _VERSION */);
+    check(kal::process::has(kal::process::confine) == (landlock >= 3),
+          "confinement is claimed only where Landlock can restrict file truncation");
 
     const kal_intptr n = kal_env_image(g_self, sizeof g_self - 1);
     if (n <= 0 || g_self[0] != '/') { std::printf("FAIL: the program's own image is named\n"); return 1; }
@@ -138,8 +165,17 @@ int main(int argc, char** argv) {
         const int s = start("--write-raw", grants, count, kal::process::confine_flag.bits);
         check(s == 60, "a confined program is refused by the kernel what its grants do not allow, without openkal");
         if (s != 60) std::printf("  the confined program reported %d\n", s);
+        std::snprintf(path, sizeof path, "%s/present.txt", g_dir);
+        const char* truncations[] = { "--truncate-raw", "--open-truncate-raw" };
+        for (const char* errand : truncations) {
+            check(start(errand, grants, count, kal::process::confine_flag.bits, path) == 63,
+                  "a readable file in a read-only grant cannot be truncated without openkal");
+            struct stat info{};
+            check(::stat(path, &info) == 0 && info.st_size == 1,
+                  "the read-only file retains its contents after the raw truncation attempt");
+        }
     } else {
-        std::printf("  this kernel has no Landlock; confinement is refused, which the conformance suite observes\n");
+        std::printf("  this kernel has no Landlock ABI 3; confinement is refused, which the conformance suite observes\n");
     }
 
     // Economy.

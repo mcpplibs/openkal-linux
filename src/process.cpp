@@ -536,13 +536,19 @@ namespace {
 // else. A ruleset of the grants, each with what its rights allow; the program
 // itself, to execute it; /proc, which the program's own implementation reads
 // (`kal_fs_resolved_name'); and /dev/null, which a null position is.
+// ABI 1/2 cannot restrict truncate(2), including O_RDONLY | O_TRUNC.
+// A read-only grant therefore requires ABI 3 before CONFINE can be claimed.
+constexpr int kConfinementAbi = 3;
+
 int landlock_abi() {
     static int abi = -2;
-    if (abi == -2) {
+    int value = __atomic_load_n(&abi, __ATOMIC_ACQUIRE);
+    if (value == -2) {
         const okl_long r = okl::sys(okl::nr_landlock_create_ruleset, 0, 0, 1 /* _VERSION */);
-        abi = okl::failed(r) ? 0 : static_cast<int>(r);
+        value = okl::failed(r) ? 0 : static_cast<int>(r);
+        __atomic_store_n(&abi, value, __ATOMIC_RELEASE);
     }
-    return abi;
+    return value;
 }
 
 okl_u64 handled_for(int abi) {
@@ -557,7 +563,7 @@ okl_u64 handled_for(int abi) {
 // replaced. Returns zero, or the kernel's negated reason.
 okl_long confine_to(const okl_u32* rights, kal_uintptr g, int base, const char* program) {
     const int abi = landlock_abi();
-    if (abi < 1) return -okl::e_nosys;
+    if (abi < kConfinementAbi) return -okl::e_nosys;
     struct { okl_u64 fs; } attr{ handled_for(abi) };
     const okl_long rs = okl::sys(okl::nr_landlock_create_ruleset, reinterpret_cast<okl_long>(&attr),
                                  sizeof attr, 0);
@@ -915,7 +921,7 @@ int kal_process_spawn(const kal_spawn* how,
     const kal_uintptr preference = how->flags & preferences;
     if ((preference & (preference - 1)) != 0) return kal_err_invalid;
     const bool confine = (how->flags & KAL_SPAWN_CONFINE) != 0;
-    if (confine && landlock_abi() < 1) return kal_err_not_supported;
+    if (confine && landlock_abi() < kConfinementAbi) return kal_err_not_supported;
     // THE NULL DEVICE BESIDE A STREAM AT ONE POSITION is two answers to one
     // question (openkal 0.22, clause 7.15).
     if (streams != nullptr
@@ -1608,7 +1614,7 @@ kal_uintptr kal_process_props(void) {
          | KAL_PROCESS_PROP_JOB | KAL_PROCESS_PROP_JOB_USAGE
          | KAL_PROCESS_PROP_JOB_LIMIT_SUPERVISED
          | KAL_PROCESS_PROP_NULL_STREAMS
-         | (landlock_abi() >= 1 ? KAL_PROCESS_PROP_CONFINE : 0u)
+         | (landlock_abi() >= kConfinementAbi ? KAL_PROCESS_PROP_CONFINE : 0u)
          | (open_id_available() || stat_state(0) != 0 ? KAL_PROCESS_PROP_OPEN_ID : 0u)
          // AGREES WITH `kal_process_stop_requested', because the header
          // defines null there as the absence this position reports. Read and
