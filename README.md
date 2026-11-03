@@ -8,7 +8,7 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.23.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.24.0"
+openkal-linux = "0.24.1"
 ```
 
 ## Why it does not use a C library
@@ -124,10 +124,21 @@ to its record in batches, and `e\0` at `kal_exit` or the C library's
 destructors. A grant carries its rights in `KAL_GRANT_RIGHTS`, and its record
 as a descriptor after the grants.
 
-**Confinement** (`KAL_SPAWN_CONFINE`, `KAL_PROCESS_PROP_CONFINE`): Landlock, at
-the ABI version the kernel reports, set in the started image before it is
-replaced. The grants are the rules, by their rights; the program's own file,
+**Confinement** (`KAL_SPAWN_CONFINE`, `KAL_PROCESS_PROP_CONFINE`): Landlock ABI 3
+or later, set in the started image before it is replaced. Earlier ABIs cannot
+restrict file truncation, so confinement is not claimed and a request is
+refused before starting a program. The grants are the rules, by their rights; the program's own file,
 `/proc` and `/dev/null` are added, and `PR_SET_NO_NEW_PRIVS` is set.
+
+## What 0.24.1 fixes
+
+Confinement requires Landlock ABI 3, which can restrict both `truncate(2)` and
+`open(2)` with `O_RDONLY | O_TRUNC`. ABI 1 and 2 restrict opening a file for
+writing but cannot prevent these changes to a file in a read-only grant.
+The ABI cache uses atomic accesses when several threads first query process
+properties or start a program concurrently. The regression test opens an
+existing granted file for reading, attempts both raw truncation operations,
+and checks that its length remains unchanged.
 
 **Observation.** A fault is reported on an alternate stack from
 `/proc/self/maps` and the ELF symbol tables, and the program is then ended as
