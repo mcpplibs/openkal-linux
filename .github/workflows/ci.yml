@@ -36,8 +36,8 @@ env:
   # fails with exit 2. This is the CI pin -- what this repository is
   # tested against -- and not a floor: nothing here records a minimum
   # engine for consumers.
-  MCPP_VERSION: 2026.9.11.3
-  XLINGS_VERSION: v2026.8.17.2
+  MCPP_VERSION: 2026.11.5.1
+  XLINGS_VERSION: v2026.10.26.1
   XLINGS_NON_INTERACTIVE: '1'
 
 jobs:

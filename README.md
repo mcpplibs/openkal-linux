@@ -5,11 +5,19 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.23.0"
+openkal = "0.24.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.24.2"
+openkal-linux = "0.25.0"
 ```
+
+## Observable process units
+
+The process interface provides the OpenKal 0.24 declared-unit operations.
+References bind the original process-group identity to its birth, boot and
+PID namespace. Retirement checks the live continuation before and after
+membership migration; ambiguity reports `unknown`. No process registry is
+installed.
 
 ## Why it does not use a C library
 

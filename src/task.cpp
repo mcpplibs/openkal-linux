@@ -213,7 +213,15 @@ struct self_bounds {
     int      state;   // 0 not yet asked, 1 answered
 };
 
-thread_local self_bounds g_self = { nullptr, 0, 0 };
+// A standalone implementation establishes the program's one native TLS block.
+// PIC must not add a call into a C library's dynamic TLS resolver beneath it.
+// The hosted arrangement retains the compiler's dynamic-loading convention.
+#ifdef OKL_STANDALONE
+#define OKL_TLS_MODEL __attribute__((tls_model("initial-exec")))
+#else
+#define OKL_TLS_MODEL
+#endif
+thread_local OKL_TLS_MODEL self_bounds g_self = { nullptr, 0, 0 };
 
 #ifdef OKL_STANDALONE
 
@@ -243,7 +251,7 @@ okl_uptr pages_per_chunk() {
 // apart from "not mapped" because the two lead to different reports: a range
 // derived from a refusal is a range derived from nothing, and the caller is
 // owed the refusal instead.
-thread_local okl_long g_refusal = 0;
+thread_local OKL_TLS_MODEL okl_long g_refusal = 0;
 
 // Whether every page in the range is mapped. False with `mapped' unset means
 // at least one is not; false with `g_refusal' set means the environment would
@@ -620,7 +628,7 @@ kal_uintptr kal_task_current(void) {
     // The identity is the kernel's, read once per context. It is unique among
     // contexts running at the same moment and may be reused after one ends,
     // which is what the specification says of it.
-    static thread_local int cached = 0;
+    static thread_local OKL_TLS_MODEL int cached = 0;
     if (cached == 0) cached = static_cast<int>(okl::sys(okl::nr_gettid));
     return static_cast<kal_uintptr>(cached);
 }
