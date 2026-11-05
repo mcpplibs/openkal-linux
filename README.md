@@ -8,7 +8,7 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.23.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.24.1"
+openkal-linux = "0.24.2"
 ```
 
 ## Why it does not use a C library
@@ -227,7 +227,9 @@ and later) instead of polling.
 
 A unit is a process group, and its use is the sum over the entries of /proc
 whose group is the unit's --- every program in it, including those its members
-started; one read per program on the machine, made only when a caller asks.
+started. Every visible program's group is queried; resident memory is read for
+matching programs. If the group query is refused, the same /proc record supplies
+both membership and memory. Nothing is retained between observations.
 `KAL_PROCESS_PROP_JOB_USAGE` is claimed.
 
 **A limit on a unit is supervised.** `kal_process_job_limit` starts, with the
