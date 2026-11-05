@@ -1959,7 +1959,7 @@ int kal_process_job_limit(kal_job j, kal_uintptr kind, kal_u64 value) {
 #include "unit_reference.h"
 namespace {
 struct unit_identity {
-    kal_u64 group = 0, birth = 0, previous = 0, previous_birth = 0;
+    kal_u64 group = 0, birth = 0;
     char boot[64]{}, space[64]{};
 };
 bool unit_birth(okl_long pid, kal_u64& value) { okl_u64 ticks = 0; if (!started_ticks(pid,ticks)) return false; value = ticks; return true; }
@@ -1981,11 +1981,9 @@ bool unit_origin(char* boot, char* space) {
 bool unit_parse(const char* p, kal_uintptr n, unit_identity& u) {
     if (!p || n == 0 || n > 256) return false;
     unit_reference::reader r{p,n}; char kind[8]{};
-    return r.token(kind, sizeof kind) && unit_reference::same(kind,"L1")
+    return r.token(kind, sizeof kind) && unit_reference::same(kind,"L2")
         && r.number(u.group) && u.group > 0 && u.group <= 0x7fffffffu
         && r.number(u.birth) && u.birth != 0
-        && r.number(u.previous) && u.previous > 0 && u.previous <= 0x7fffffffu
-        && r.number(u.previous_birth) && u.previous_birth != 0
         && r.token(u.boot,sizeof u.boot) && r.token(u.space,sizeof u.space) && r.at == n;
 }
 bool unit_same_origin(const unit_identity& u) {
@@ -1999,12 +1997,9 @@ int kal_process_job_create(kal_job* out, char* reference, kal_uintptr capacity, 
     if (capacity < 256) return kal_err_no_space;
     unit_identity u;
     u.group = static_cast<kal_u64>(okl::sys(okl::nr_getpid));
-    u.previous = static_cast<kal_u64>(okl::sys(okl::nr_getpgid,0));
-    if (u.previous == u.group || !unit_origin(u.boot,u.space)
-        || !unit_birth(0,u.birth) || !unit_birth(static_cast<okl_long>(u.previous),u.previous_birth)
-        || !u.birth || !u.previous_birth) return kal_err_not_supported;
-    unit_reference::writer w; w.text("L1;"); w.number(u.group); w.next(); w.number(u.birth); w.next();
-    w.number(u.previous); w.next(); w.number(u.previous_birth); w.next(); w.text(u.boot); w.next(); w.text(u.space);
+    if (!unit_origin(u.boot,u.space)||!unit_birth(0,u.birth)||!u.birth) return kal_err_not_supported;
+    unit_reference::writer w; w.text("L2;"); w.number(u.group); w.next(); w.number(u.birth); w.next();
+    w.text(u.boot); w.next(); w.text(u.space);
     if (!w.valid) return kal_err_no_space;
     kal_job job{}; const int rc = kal_process_job_enter(&job);
     if (rc != kal_ok) return rc;
@@ -2027,18 +2022,28 @@ int kal_process_job_observe(kal_job job, const char* reference, kal_uintptr leng
     if (started_ticks(static_cast<okl_long>(u.group),birth) && birth != u.birth) return kal_ok;
     *state = KAL_JOB_OCCUPIED; return kal_ok;
 }
-int kal_process_job_retire(kal_job job, const char* reference, kal_uintptr length, kal_u32* state) {
+int kal_process_job_retire(kal_job job, const char* reference, kal_uintptr length,
+                           const kal_program_identity* continuation, kal_u32* state) {
     if (!state) return kal_err_invalid; *state = KAL_JOB_UNKNOWN;
     unit_identity u; if (!unit_parse(reference,length,u) || job.h != u.group) return kal_err_invalid;
     okl_u64 birth = 0;
     if (static_cast<kal_u64>(okl::sys(okl::nr_getpid)) != u.group || !unit_same_origin(u)
         || !started_ticks(0,birth) || birth != u.birth) return kal_err_permission;
+    if (!continuation || !continuation->id || continuation->id > 0x7fffffffu || !continuation->started_ns)
+        return kal_ok;
+    const auto anchor = static_cast<okl_long>(continuation->id);
+    if (!started_ticks(anchor,birth) || ticks_to_ns(birth) != continuation->started_ns
+        || stat_state(anchor) == 'Z' || stat_state(anchor) == 'X') return kal_ok;
+    const auto destination = okl::sys(okl::nr_getpgid,anchor);
+    if (destination <= 0 || destination == static_cast<okl_long>(u.group)) return kal_ok;
     const auto current = okl::sys(okl::nr_getpgid,0);
     if (current == static_cast<okl_long>(u.group)) {
-        if (!started_ticks(static_cast<okl_long>(u.previous),birth) || birth != u.previous_birth) return kal_ok;
-        const auto rc = okl::sys(okl::nr_setpgid,0,static_cast<okl_long>(u.previous));
-        if (okl::failed(rc)) return kal_ok;
-    } else if (current != static_cast<okl_long>(u.previous)) return kal_ok;
+        if (okl::failed(okl::sys(okl::nr_setpgid,0,destination))) return kal_ok;
+    } else if (current != destination) return kal_ok;
+    if (!started_ticks(anchor,birth) || ticks_to_ns(birth) != continuation->started_ns
+        || stat_state(anchor) == 'Z' || stat_state(anchor) == 'X'
+        || okl::sys(okl::nr_getpgid,anchor) != destination
+        || okl::sys(okl::nr_getpgid,0) != destination) return kal_ok;
     return kal_process_job_observe(job,reference,length,state);
 }
 }
