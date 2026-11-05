@@ -1767,6 +1767,12 @@ kal_u32 members_of(okl_long unit, okl_u64& memory) {
             if (name[0] < '1' || name[0] > '9') continue;
             okl_long pid = 0;
             for (const char* c = name; *c; ++c) pid = pid * 10 + (*c - '0');
+            // Most visible programs belong to other units. Ask for the group
+            // before opening a record whose memory will then be discarded.
+            // A denied or unavailable query keeps the record-reading path;
+            // even a positive query is checked again in that same RSS record.
+            const okl_long group = okl::sys(okl::nr_getpgid, pid);
+            if (!okl::failed(group) && group != unit) continue;
             char b[1024];
             const okl_long len = read_stat(pid, b);
             if (len <= 0) continue;
