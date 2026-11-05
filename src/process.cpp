@@ -1607,7 +1607,7 @@ int kal_process_end_as_requested(void) {
 }
 
 kal_uintptr kal_process_props(void) {
-    return KAL_PROCESS_PROP_TERMINATE | KAL_PROCESS_PROP_STREAM_PASSING
+    return KAL_PROCESS_PROP_JOB_OBSERVE | KAL_PROCESS_PROP_TERMINATE | KAL_PROCESS_PROP_STREAM_PASSING
          | KAL_PROCESS_PROP_EXIT_STATUS
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
@@ -1952,4 +1952,93 @@ int kal_process_job_limit(kal_job j, kal_uintptr kind, kal_u64 value) {
     return kal_ok;
 }
 
+}
+
+// Observable units (openkal 0.24). The unit stays the kernel's own group;
+// identity validation does not create a registry or infer quiet from a leader.
+#include "unit_reference.h"
+namespace {
+struct unit_identity {
+    kal_u64 group = 0, birth = 0, previous = 0, previous_birth = 0;
+    char boot[64]{}, space[64]{};
+};
+bool unit_birth(okl_long pid, kal_u64& value) { okl_u64 ticks = 0; if (!started_ticks(pid,ticks)) return false; value = ticks; return true; }
+bool unit_origin(char* boot, char* space) {
+    if (self_number() != okl::sys(okl::nr_getpid)) return false;
+    const auto fd = okl::sys(okl::nr_openat, okl::at_fdcwd,
+        reinterpret_cast<okl_long>("/proc/sys/kernel/random/boot_id"), okl::o_rdonly | okl::o_cloexec, 0);
+    if (okl::failed(fd)) return false;
+    auto n = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(boot), 63);
+    okl::sys(okl::nr_close, fd);
+    if (n <= 0 || n >= 63) return false;
+    while (n > 0 && (boot[n - 1] == '\n' || boot[n - 1] == '\r')) --n;
+    boot[n] = 0;
+    n = okl::sys(okl::nr_readlinkat, okl::at_fdcwd,
+        reinterpret_cast<okl_long>("/proc/self/ns/pid"), reinterpret_cast<okl_long>(space), 63);
+    if (n <= 0 || n >= 63) return false;
+    space[n] = 0; return true;
+}
+bool unit_parse(const char* p, kal_uintptr n, unit_identity& u) {
+    if (!p || n == 0 || n > 256) return false;
+    unit_reference::reader r{p,n}; char kind[8]{};
+    return r.token(kind, sizeof kind) && unit_reference::same(kind,"L1")
+        && r.number(u.group) && u.group > 0 && u.group <= 0x7fffffffu
+        && r.number(u.birth) && u.birth != 0
+        && r.number(u.previous) && u.previous > 0 && u.previous <= 0x7fffffffu
+        && r.number(u.previous_birth) && u.previous_birth != 0
+        && r.token(u.boot,sizeof u.boot) && r.token(u.space,sizeof u.space) && r.at == n;
+}
+bool unit_same_origin(const unit_identity& u) {
+    char boot[64]{}, space[64]{};
+    return unit_origin(boot,space) && unit_reference::same(u.boot,boot) && unit_reference::same(u.space,space);
+}
+}
+extern "C" {
+int kal_process_job_create(kal_job* out, char* reference, kal_uintptr capacity, kal_uintptr* used) {
+    if (!out || !reference || !used) return kal_err_invalid;
+    if (capacity < 256) return kal_err_no_space;
+    unit_identity u;
+    u.group = static_cast<kal_u64>(okl::sys(okl::nr_getpid));
+    u.previous = static_cast<kal_u64>(okl::sys(okl::nr_getpgid,0));
+    if (u.previous == u.group || !unit_origin(u.boot,u.space)
+        || !unit_birth(0,u.birth) || !unit_birth(static_cast<okl_long>(u.previous),u.previous_birth)
+        || !u.birth || !u.previous_birth) return kal_err_not_supported;
+    unit_reference::writer w; w.text("L1;"); w.number(u.group); w.next(); w.number(u.birth); w.next();
+    w.number(u.previous); w.next(); w.number(u.previous_birth); w.next(); w.text(u.boot); w.next(); w.text(u.space);
+    if (!w.valid) return kal_err_no_space;
+    kal_job job{}; const int rc = kal_process_job_enter(&job);
+    if (rc != kal_ok) return rc;
+    *out = job; return unit_reference::copy(w,reference,capacity,used);
+}
+int kal_process_job_open(const char* reference, kal_uintptr length, kal_job* out) {
+    if (!out) return kal_err_invalid;
+    unit_identity u; if (!unit_parse(reference,length,u)) return kal_err_invalid;
+    if (!unit_same_origin(u)) return kal_err_not_supported;
+    out->h = static_cast<kal_uintptr>(u.group); return kal_ok;
+}
+int kal_process_job_observe(kal_job job, const char* reference, kal_uintptr length, kal_u32* state) {
+    if (!state) return kal_err_invalid; *state = KAL_JOB_UNKNOWN;
+    unit_identity u; if (!unit_parse(reference,length,u) || job.h != u.group) return kal_err_invalid;
+    if (!unit_same_origin(u)) return kal_ok;
+    const auto status = okl::sys(okl::nr_kill,-static_cast<okl_long>(u.group),0);
+    if (status == -3 /* ESRCH */) { *state = KAL_JOB_EMPTY; return kal_ok; }
+    if (okl::failed(status)) return kal_ok;
+    okl_u64 birth = 0;
+    if (started_ticks(static_cast<okl_long>(u.group),birth) && birth != u.birth) return kal_ok;
+    *state = KAL_JOB_OCCUPIED; return kal_ok;
+}
+int kal_process_job_retire(kal_job job, const char* reference, kal_uintptr length, kal_u32* state) {
+    if (!state) return kal_err_invalid; *state = KAL_JOB_UNKNOWN;
+    unit_identity u; if (!unit_parse(reference,length,u) || job.h != u.group) return kal_err_invalid;
+    okl_u64 birth = 0;
+    if (static_cast<kal_u64>(okl::sys(okl::nr_getpid)) != u.group || !unit_same_origin(u)
+        || !started_ticks(0,birth) || birth != u.birth) return kal_err_permission;
+    const auto current = okl::sys(okl::nr_getpgid,0);
+    if (current == static_cast<okl_long>(u.group)) {
+        if (!started_ticks(static_cast<okl_long>(u.previous),birth) || birth != u.previous_birth) return kal_ok;
+        const auto rc = okl::sys(okl::nr_setpgid,0,static_cast<okl_long>(u.previous));
+        if (okl::failed(rc)) return kal_ok;
+    } else if (current != static_cast<okl_long>(u.previous)) return kal_ok;
+    return kal_process_job_observe(job,reference,length,state);
+}
 }
