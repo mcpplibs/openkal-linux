@@ -161,8 +161,10 @@ UTest openkal_0_23_test{"openkal_0_23", [] {
         ro.flags = kal::fs::dir_read_only.bits;
         // What a program of this system reads to start --- its loader and
         // libraries, wherever the toolchain put them --- and /tmp, read-only;
-        // /etc is not granted.
-        static const char* const trees[] = { "tmp", "usr", "lib", "lib64", "home" };
+        // /etc is not granted. /dev is granted read-only too: the test
+        // library's entry, which runs in the copy before its errand, takes a
+        // seed from std::random_device, and libc++ reads it from /dev/urandom.
+        static const char* const trees[] = { "tmp", "usr", "lib", "lib64", "home", "dev" };
         kal_preopen grants[8];
         static char names[8][16];
         kal_uintptr count = 0;
