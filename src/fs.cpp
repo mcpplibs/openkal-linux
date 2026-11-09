@@ -1080,11 +1080,11 @@ int kal_fs_link_create(kal_dir base, const char* name, kal_uintptr len,
 }
 
 // A SECOND NAME FOR A FILE (0.25) is `linkat' with no flags, which gives the
-// node the name denotes another name and does not follow a final link. Two
-// conditions are answered before the call, because the kernel's own answers
-// name a different condition: a directory is refused with EPERM, which reads as
-// a permission, and two volumes with EXDEV, which this interface states as an
-// operation the pair cannot perform.
+// node the name denotes another name and does not follow a final link. A
+// directory is refused before the call, because the kernel refuses it with
+// EPERM, which reads as a permission. Two volumes are refused by the kernel with
+// EXDEV, which is reported as kal_err_not_supported: an operation the pair
+// cannot perform.
 int kal_fs_hard_link(kal_dir from, const char* a, kal_uintptr alen,
                      kal_dir to,   const char* b, kal_uintptr blen) {
     const int f = okl::unpack(from.h), t2 = okl::unpack(to.h);

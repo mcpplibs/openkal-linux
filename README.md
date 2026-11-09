@@ -18,12 +18,13 @@ final link receives the name itself. `KAL_FS_PROP_HARD_LINKS` is claimed on the
 formats whose names the kernel keeps and that store several names for one node
 (ext2/3/4, btrfs, xfs, f2fs, tmpfs, overlay, bcachefs, zfs, ntfs, hfsplus), and not
 on FAT, exFAT, read-only formats or a format this implementation does not know. A
-directory is refused with `kal_err_is_directory` and two volumes with
-`kal_err_not_supported` before the kernel is asked, because its own answers
-(`EPERM`, `EXDEV`) name other conditions.
+directory is refused with `kal_err_is_directory` before the call, because the
+kernel's own answer (`EPERM`) names a permission; two volumes are refused by the
+kernel with `EXDEV`, which is reported as `kal_err_not_supported`.
 
 **The requests to end are counted.** The handler adds one to the stop word for each
-request and writes one where the count wraps to zero.
+request, and one where the count would wrap to zero, in a single compare-and-exchange,
+so two handlers that interrupt one another each count.
 
 ## Observable process units
 
