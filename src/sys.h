@@ -106,7 +106,7 @@ enum : okl_long {
     nr_openat = 257, nr_mkdirat = 258, nr_newfstatat = 262, nr_unlinkat = 263,
     nr_renameat = 264, nr_readlinkat = 267, nr_dup3 = 292, nr_execveat = 322,
     nr_close_range = 436, nr_prlimit64 = 302,
-    nr_dup2 = 33, nr_utimensat = 280, nr_symlinkat = 266, nr_fstatfs = 138,
+    nr_dup2 = 33, nr_utimensat = 280, nr_symlinkat = 266, nr_linkat = 265, nr_fstatfs = 138,
     nr_getrandom = 318, nr_sched_setscheduler = 144,
     // openkal 0.15: the region a context stands on is measured by asking the
     // kernel which pages are mapped. The floor comes from the limit the kernel
@@ -212,7 +212,7 @@ enum : okl_long {
     nr_dup3 = 24, nr_execveat = 281,
     nr_close_range = 436, nr_prlimit64 = 261, nr_dup2 = -1, nr_fcntl = 25,
     nr_prctl = 167, nr_sched_getaffinity = 123, nr_getppid = 173,
-    nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_fstatfs = 44,
+    nr_arch_prctl = -1, nr_utimensat = 88, nr_symlinkat = 36, nr_linkat = 37, nr_fstatfs = 44,
     nr_getrandom = 278, nr_sched_setscheduler = 119,
     // openkal 0.15: the region a context stands on is measured by asking the
     // kernel which pages are mapped. The floor comes from the limit the kernel

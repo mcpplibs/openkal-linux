@@ -237,12 +237,12 @@ kal_uintptr volume_props(int fd) {
         case okl::fs_f2fs:   case okl::fs_tmpfs: case okl::fs_overlay:
         case okl::fs_bcachefs:
             return local | KAL_FS_PROP_CASE_SENSITIVE
-                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
+                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS | KAL_FS_PROP_HARD_LINKS
                  | KAL_FS_PROP_EXECUTABLE
                  | KAL_FS_PROP_RENAME_NO_REPLACE | KAL_FS_PROP_LOCAL_ENDPOINT;
         case okl::fs_zfs:
             return local | KAL_FS_PROP_CASE_SENSITIVE
-                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
+                 | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS | KAL_FS_PROP_HARD_LINKS
                  | KAL_FS_PROP_EXECUTABLE | KAL_FS_PROP_LOCAL_ENDPOINT;
 
         // Read-only formats: the nodes are there and none can be made, and a
@@ -263,10 +263,10 @@ kal_uintptr volume_props(int fd) {
 
         // A case-insensitive namespace, with nodes that name others.
         case okl::fs_ntfs: case okl::fs_ntfs3:
-            return local | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS;
+            return local | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS | KAL_FS_PROP_HARD_LINKS;
         // The same, on a format that stores a mode.
         case okl::fs_hfsplus:
-            return local | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS
+            return local | KAL_FS_PROP_LINKS | KAL_FS_PROP_MAKE_LINKS | KAL_FS_PROP_HARD_LINKS
                  | KAL_FS_PROP_EXECUTABLE;
 
         default:
@@ -1076,6 +1076,33 @@ int kal_fs_link_create(kal_dir base, const char* name, kal_uintptr len,
                                 b, reinterpret_cast<okl_long>(n.buf));
     if (okl::failed(r)) return okl::translate(r);
     wrote(b, name, len);
+    return kal_ok;
+}
+
+// A SECOND NAME FOR A FILE (0.25) is `linkat' with no flags, which gives the
+// node the name denotes another name and does not follow a final link. Two
+// conditions are answered before the call, because the kernel's own answers
+// name a different condition: a directory is refused with EPERM, which reads as
+// a permission, and two volumes with EXDEV, which this interface states as an
+// operation the pair cannot perform.
+int kal_fs_hard_link(kal_dir from, const char* a, kal_uintptr alen,
+                     kal_dir to,   const char* b, kal_uintptr blen) {
+    const int f = okl::unpack(from.h), t2 = okl::unpack(to.h);
+    if (f < 0 || t2 < 0 || !okl::acceptable(a, alen) || !okl::acceptable(b, blen)) return kal_err_invalid;
+    if ((volume_props(t2) & KAL_FS_PROP_HARD_LINKS) == 0) return kal_err_not_supported;
+    okl::terminated ta(a, alen), tb(b, blen);
+    if (!ta.ok || !tb.ok) return kal_err_invalid;
+    if (refused_write(t2)) return kal_err_permission;
+    okl::kstat st{};
+    const okl_long s = okl::sys(okl::nr_newfstatat, f, reinterpret_cast<okl_long>(ta.buf),
+                                reinterpret_cast<okl_long>(&st), okl::at_symlink_nofollow);
+    if (okl::failed(s)) return okl::translate(s);
+    if ((st.mode & okl::s_ifmt) == okl::s_ifdir) return kal_err_is_directory;
+    const okl_long r = okl::sys(okl::nr_linkat, f, reinterpret_cast<okl_long>(ta.buf),
+                                t2, reinterpret_cast<okl_long>(tb.buf), 0);
+    if (r == -okl::e_xdev) return kal_err_not_supported;
+    if (okl::failed(r)) return okl::translate(r);
+    wrote(t2, b, blen);
     return kal_ok;
 }
 

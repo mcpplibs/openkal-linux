@@ -1260,7 +1260,12 @@ void stop_handler(int signo) {
     int none = 0;
     __atomic_compare_exchange_n(&g_stop_signal, &none, signo, false,
                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_stop_word, 1u, __ATOMIC_RELEASE);
+    // EACH REQUEST IS COUNTED (openkal 0.25), and the count skips zero when it
+    // wraps, so the word is never zero again once a request has arrived. The
+    // add is atomic, so handlers of two signals that interrupt one another each
+    // count; the fix-up after a wrap only ever writes one.
+    if (__atomic_add_fetch(&g_stop_word, 1u, __ATOMIC_RELEASE) == 0)
+        __atomic_store_n(&g_stop_word, 1u, __ATOMIC_RELEASE);
     // PRIVATE, AS `kal_task_wait' WAITS (0.18.2). The kernel keys a private
     // futex apart from a shared one at the same address, so a shared wake
     // reached no context waiting through `kal_task_wait' with no bound, and a
