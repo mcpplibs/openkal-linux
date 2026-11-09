@@ -3,18 +3,12 @@ import openkal.process;
 import openkal.task;
 import openkal.fs;
 import openkal.stream;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
-int failures = 0;
-void check(bool ok, const char* what) {
-    if (ok) return;
-    ++failures;
-    const char pre[] = "FAIL: ";
-    kal::write(kal::err(), pre, sizeof(pre) - 1);
-    kal_uintptr n = 0; while (what[n]) ++n;
-    kal::write(kal::err(), what, n);
-    kal::write(kal::err(), "\n", 1);
-}
+void check(bool ok, const char* what) { expect(ok) << what; }
 
 // Shared between contexts. The word is what openkal.task suspends upon, and it
 // is ordinary memory: the interface adds no object of its own.
@@ -31,7 +25,7 @@ void worker(void* arg) {
 }
 }
 
-int main() {
+UTest conformance_process_task_test{"conformance_process_task", [] {
     // --- openkal.process -----------------------------------------------------
     //
     // The program to start is reached through a directory the environment
@@ -190,5 +184,4 @@ int main() {
 
     const char ok[] = "openkal-linux: process and task conformance\n";
     kal::write(kal::out(), ok, sizeof(ok) - 1);
-    return failures == 0 ? 0 : 1;
-}
+}};

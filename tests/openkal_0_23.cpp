@@ -9,6 +9,8 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdlib>
+#include <string>
+#include <vector>
 #include <fcntl.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -19,12 +21,12 @@ import openkal.env;
 import openkal.fs;
 import openkal.process;
 import openkal.abort;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
-int failures = 0;
-void check(bool held, const char* what) {
-    if (!held) { std::printf("FAIL: %s\n", what); ++failures; }
-}
+void check(bool held, const char* what) { expect(held) << what; }
 
 kal_dir root() {
     for (kal_uintptr i = 0; i < kal_fs_preopen_count(); ++i) {
@@ -40,12 +42,16 @@ char g_dir[] = "/tmp/okl-0.24-XXXXXX";
 int start(const char* errand, const kal_preopen* grants, kal_uintptr n, kal_uintptr flags,
           const char* operand = nullptr) {
     const kal_dir r = root();
-    const char* args[] = { g_self, errand, operand };
-    const kal_uintptr lens[] = { std::strlen(g_self), std::strlen(errand), operand ? std::strlen(operand) : 0 };
+    std::vector<std::string> operands;
+    if (operand) operands.emplace_back(operand);
+    const std::vector<std::string> command = child_command(errand, operands);
+    std::vector<const char*> args;
+    std::vector<kal_uintptr> lens;
+    for (const auto& a : command) { args.push_back(a.c_str()); lens.push_back(a.size()); }
     const kal_spawn how{ r, r, nullptr, grants, n, flags };
     kal_process p{};
-    if (kal_process_spawn(&how, g_self + 1, std::strlen(g_self + 1), args, lens, operand ? 3 : 2, nullptr, nullptr, 0,
-                          nullptr, &p) != kal_ok)
+    if (kal_process_spawn(&how, g_self + 1, std::strlen(g_self + 1), args.data(), lens.data(), args.size(), nullptr,
+                          nullptr, 0, nullptr, &p) != kal_ok)
         return -1;
     int status = -1, terminated = 0;
     kal_process_wait(p, &status, &terminated);
@@ -54,49 +60,55 @@ int start(const char* errand, const kal_preopen* grants, kal_uintptr n, kal_uint
 }
 }  // namespace
 
-int main(int argc, char** argv) {
-    if (argc > 1 && std::strcmp(argv[1], "--read") == 0) {
-        // The first preopen is the recorded grant: read a file, ask for an
-        // absent one, and end through kal_exit so the record is ended.
-        kal_dir d{}; kal_uintptr l = 0;
-        if (kal_fs_preopen(0, &d, nullptr, 0, &l) != kal_ok) kal_exit(51);
-        kal_file f{};
-        if (kal_fs_open(d, "present.txt", 11, kal::fs::open::read.bits, &f) != kal_ok) kal_exit(52);
-        kal_fs_close_file(f);
-        kal_node_info i{}; i.self_size = sizeof i;
-        kal_fs_info(d, "absent.txt", 10, 0, kal::fs::field::kind, &i);
-        kal_exit(0);
-    }
-    if (argc > 1 && std::strcmp(argv[1], "--write-raw") == 0) {
-        // Past openkal: the kernel itself is asked to create a file in the
-        // read-only grant, and in a directory not granted at all.
-        const int a = static_cast<int>(::syscall(SYS_openat, AT_FDCWD, "/tmp/okl-0.24-raw.tmp", O_CREAT | O_WRONLY, 0600));
-        if (a >= 0) { ::unlink("/tmp/okl-0.24-raw.tmp"); return 61; }
-        const int b = static_cast<int>(::syscall(SYS_openat, AT_FDCWD, "/etc/hostname", O_RDONLY));
-        if (b >= 0) return 62;
-        return 60;
-    }
-    if (argc > 1 && std::strcmp(argv[1], "--thp") == 0)
-        return static_cast<int>(::prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0)) == 1 ? 70 : 71;
-    if (argc == 3 && (std::strcmp(argv[1], "--truncate-raw") == 0 ||
-                      std::strcmp(argv[1], "--open-truncate-raw") == 0)) {
-        // Prove the existing file is readable before asking the kernel to
-        // truncate it. Missing files and unreachable grants are not proof.
-        const int readable = static_cast<int>(::syscall(SYS_openat, AT_FDCWD, argv[2], O_RDONLY));
-        if (readable < 0) return 66;
-        ::close(readable);
-        errno = 0;
-        const long result = std::strcmp(argv[1], "--truncate-raw") == 0
-            ? ::syscall(SYS_truncate, argv[2], 0)
-            : ::syscall(SYS_openat, AT_FDCWD, argv[2], O_RDONLY | O_TRUNC);
-        const int why = errno;
-        if (result >= 0) {
-            if (std::strcmp(argv[1], "--open-truncate-raw") == 0) ::close(static_cast<int>(result));
-            return 64;
-        }
-        return why == EACCES ? 63 : 65;
-    }
+// The first preopen is the recorded grant: read a file, ask for an absent one,
+// and end through kal_exit so the record is ended.
+child read_granted{"read", [](std::vector<std::string>) -> int {
+    kal_dir d{}; kal_uintptr l = 0;
+    if (kal_fs_preopen(0, &d, nullptr, 0, &l) != kal_ok) kal_exit(51);
+    kal_file f{};
+    if (kal_fs_open(d, "present.txt", 11, kal::fs::open::read.bits, &f) != kal_ok) kal_exit(52);
+    kal_fs_close_file(f);
+    kal_node_info i{}; i.self_size = sizeof i;
+    kal_fs_info(d, "absent.txt", 10, 0, kal::fs::field::kind, &i);
+    kal_exit(0);
+}};
 
+// Past openkal: the kernel itself is asked to create a file in the read-only
+// grant, and in a directory not granted at all.
+child write_raw{"write-raw", [](std::vector<std::string>) {
+    const int a = static_cast<int>(::syscall(SYS_openat, AT_FDCWD, "/tmp/okl-0.24-raw.tmp", O_CREAT | O_WRONLY, 0600));
+    if (a >= 0) { ::unlink("/tmp/okl-0.24-raw.tmp"); return 61; }
+    const int b = static_cast<int>(::syscall(SYS_openat, AT_FDCWD, "/etc/hostname", O_RDONLY));
+    if (b >= 0) return 62;
+    return 60;
+}};
+
+child thp{"thp", [](std::vector<std::string>) {
+    return static_cast<int>(::prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0)) == 1 ? 70 : 71;
+}};
+
+// Prove the existing file is readable before asking the kernel to truncate it.
+// Missing files and unreachable grants are not proof.
+int truncate_raw(const std::vector<std::string>& args, bool by_open) {
+    if (args.size() != 1) return 67;
+    const char* path = args[0].c_str();
+    const int readable = static_cast<int>(::syscall(SYS_openat, AT_FDCWD, path, O_RDONLY));
+    if (readable < 0) return 66;
+    ::close(readable);
+    errno = 0;
+    const long result = by_open ? ::syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_TRUNC)
+                                : ::syscall(SYS_truncate, path, 0);
+    const int why = errno;
+    if (result >= 0) {
+        if (by_open) ::close(static_cast<int>(result));
+        return 64;
+    }
+    return why == EACCES ? 63 : 65;
+}
+child truncate_by_name{"truncate-raw", [](std::vector<std::string> args) { return truncate_raw(args, false); }};
+child truncate_by_open{"open-truncate-raw", [](std::vector<std::string> args) { return truncate_raw(args, true); }};
+
+UTest openkal_0_23_test{"openkal_0_23", [] {
     // The pinned compiler's Linux headers can predate Landlock. This syscall
     // has number 444 on both architectures this implementation builds for.
     const long landlock = ::syscall(444, nullptr, 0, 1 /* _VERSION */);
@@ -104,9 +116,9 @@ int main(int argc, char** argv) {
           "confinement is claimed only where Landlock can restrict file truncation");
 
     const kal_intptr n = kal_env_image(g_self, sizeof g_self - 1);
-    if (n <= 0 || g_self[0] != '/') { std::printf("FAIL: the program's own image is named\n"); return 1; }
+    if (n <= 0 || g_self[0] != '/') { fail("the program's own image is named"); return; }
     g_self[n] = 0;
-    if (!mkdtemp(g_dir)) { std::printf("FAIL: a directory for the test\n"); return 1; }
+    if (!mkdtemp(g_dir)) { fail("a directory for the test"); return; }
     char path[256];
     std::snprintf(path, sizeof path, "%s/present.txt", g_dir);
     { const int fd = ::open(path, O_CREAT | O_WRONLY, 0600); (void)!::write(fd, "x", 1); ::close(fd); }
@@ -124,7 +136,7 @@ int main(int argc, char** argv) {
     kal_dir rd{};
     check(kal_fs_dir_attenuate(dir, &rights, &rd) == kal_ok, "the directory is attenuated, recorded");
     const kal_preopen grant{ rd, "/granted", 8 };
-    check(start("--read", &grant, 1, 0) == 0, "a program granted the recorded handle reads through it");
+    check(start("read", &grant, 1, 0) == 0, "a program granted the recorded handle reads through it");
     kal_fs_close_dir(rd);
     kal_fs_close_file(rec);
     char buf[4096] = {};
@@ -162,11 +174,11 @@ int main(int argc, char** argv) {
             grants[count] = kal_preopen{ a, names[count], std::strlen(names[count]) };
             ++count;
         }
-        const int s = start("--write-raw", grants, count, kal::process::confine_flag.bits);
-        check(s == 60, "a confined program is refused by the kernel what its grants do not allow, without openkal");
-        if (s != 60) std::printf("  the confined program reported %d\n", s);
+        const int s = start("write-raw", grants, count, kal::process::confine_flag.bits);
+        expect(s == 60) << "a confined program is refused by the kernel what its grants do not allow, without openkal"
+                        << " (the confined program reported " << s << ")";
         std::snprintf(path, sizeof path, "%s/present.txt", g_dir);
-        const char* truncations[] = { "--truncate-raw", "--open-truncate-raw" };
+        const char* truncations[] = { "truncate-raw", "open-truncate-raw" };
         for (const char* errand : truncations) {
             check(start(errand, grants, count, kal::process::confine_flag.bits, path) == 63,
                   "a readable file in a read-only grant cannot be truncated without openkal");
@@ -179,14 +191,12 @@ int main(int argc, char** argv) {
     }
 
     // Economy.
-    check(start("--thp", nullptr, 0, kal::process::economy_flag.bits) == 70,
+    check(start("thp", nullptr, 0, kal::process::economy_flag.bits) == 70,
           "a program started for economy has no transparent huge pages");
-    check(start("--thp", nullptr, 0, kal::process::performance_flag.bits) == 71,
+    check(start("thp", nullptr, 0, kal::process::performance_flag.bits) == 71,
           "and one started for performance has them as the system decides");
 
     std::snprintf(path, sizeof path, "%s/present.txt", g_dir); ::unlink(path);
     std::snprintf(path, sizeof path, "%s/record", g_dir); ::unlink(path);
     ::rmdir(g_dir);
-    if (failures == 0) std::printf("openkal_0_23: ok\n");
-    return failures == 0 ? 0 : 1;
-}
+}};

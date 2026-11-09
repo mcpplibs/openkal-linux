@@ -10,18 +10,12 @@ import openkal.memory;
 import openkal.process;
 import openkal.stream;
 import openkal.types;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
-int failures = 0;
-void check(bool ok, const char* what) {
-    if (ok) return;
-    ++failures;
-    const char pre[] = "FAIL: ";
-    kal::write(kal::err(), pre, sizeof(pre) - 1);
-    kal_uintptr n = 0; while (what[n]) ++n;
-    kal::write(kal::err(), what, n);
-    kal::write(kal::err(), "\n", 1);
-}
+void check(bool ok, const char* what) { expect(ok) << what; }
 
 kal_u64 resident() {
     kal_process self{};
@@ -34,7 +28,7 @@ kal_u64 resident() {
 }
 }  // namespace
 
-int main() {
+UTest openkal_0_21_test{"openkal_0_21", [] {
     {
         void* blocks[12] = {};
         const kal_u64 before = resident();
@@ -58,5 +52,4 @@ int main() {
             kal_free(p, 100, a);
         }
     }
-    return failures == 0 ? 0 : 1;
-}
+}};

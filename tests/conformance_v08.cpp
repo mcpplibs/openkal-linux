@@ -20,14 +20,13 @@ import openkal.space;
 import openkal.timeout;
 import openkal.process;
 import openkal.abort;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
 
-int failures = 0;
-
-void check(bool held, const char* what) {
-    if (!held) { std::printf("FAIL: %s\n", what); ++failures; }
-}
+void check(bool held, const char* what) { expect(held) << what; }
 
 kal_endpoint loopback(kal_u32 port) {
     kal_endpoint ep{};
@@ -343,7 +342,7 @@ void process_additions_section() {
 
 }  // namespace
 
-int main() {
+UTest conformance_v08_test{"conformance_v08", [] {
     // FIRST, AND THE ORDER IS LOAD-BEARING. The comment above this section
     // records why: it examines a defect that corrects itself for any descriptor
     // index at which an owned handle has already been released, so running it
@@ -356,7 +355,4 @@ int main() {
     datagram_section();
     space_section();
     timeout_section();
-
-    if (failures == 0) std::printf("openkal 0.8 interfaces: every observation held\n");
-    return failures == 0 ? 0 : 1;
-}
+}};

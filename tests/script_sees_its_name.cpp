@@ -10,12 +10,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 import openkal.types;
 import openkal.fs;
 import openkal.process;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
 kal_dir root() {
@@ -27,9 +31,9 @@ kal_dir root() {
 }
 }
 
-int main() {
+UTest script_sees_its_name_test{"script_sees_its_name", [] {
     char dir[] = "/tmp/okl-script-XXXXXX";
-    if (::mkdtemp(dir) == nullptr) { std::printf("FAIL: a scratch directory\n"); return 1; }
+    if (::mkdtemp(dir) == nullptr) { fail("a scratch directory"); return; }
     char script[256], beside[256];
     std::snprintf(script, sizeof script, "%s/stub", dir);
     std::snprintf(beside, sizeof beside, "%s/beside", dir);
@@ -38,7 +42,7 @@ int main() {
         const char text[] = "#!/bin/sh\nprintf '%s' \"$0\" > \"${0%/*}/beside\"\n";
         const bool written = fd >= 0 && ::write(fd, text, sizeof text - 1) == static_cast<ssize_t>(sizeof text - 1);
         if (fd >= 0) ::close(fd);
-        if (!written) { std::printf("FAIL: the script is written\n"); return 1; }
+        if (!written) { fail("the script is written"); return; }
     }
 
     const kal_dir r = root();
@@ -57,15 +61,6 @@ int main() {
     ::unlink(script);
     ::rmdir(dir);
 
-    int failures = 0;
-    if (e != kal_ok || terminated != 0 || status != 0) {
-        std::printf("FAIL: the script is started (rc %d, status %d)\n", e, status);
-        ++failures;
-    }
-    if (std::strcmp(seen, script) != 0) {
-        std::printf("FAIL: the script sees its own name as $0 (saw '%s')\n", seen);
-        ++failures;
-    }
-    if (failures == 0) std::printf("openkal-linux: a script is given its name\n");
-    return failures == 0 ? 0 : 1;
-}
+    expect(e == kal_ok && terminated == 0 && status == 0) << "the script is started";
+    expect(eq(std::string(seen), std::string(script))) << "the script sees its own name as $0";
+}};

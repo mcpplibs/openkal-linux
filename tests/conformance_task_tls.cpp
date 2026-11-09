@@ -23,6 +23,9 @@
 import openkal.types;
 import openkal.task;
 import openkal.stream;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
 
@@ -68,32 +71,24 @@ void examine(void*) {
 
 }  // namespace
 
-int main() {
-    int failures = 0;
-
+UTest conformance_task_tls_test{"conformance_task_tls", [] {
     for (int i = 0; i < kSize; ++i) g_block[i] = kStarter;
 
     kal_task t{};
-    if (kal_task_start(examine, nullptr, &t) != kal_ok) {
-        std::printf("FAIL: a context was not started\n");
-        return 1;
-    }
-    if (kal_task_join(t) != kal_ok) {
-        std::printf("FAIL: the context was not awaited\n");
-        return 1;
-    }
+    if (kal_task_start(examine, nullptr, &t) != kal_ok) { fail("a context was not started"); return; }
+    if (kal_task_join(t) != kal_ok) { fail("the context was not awaited"); return; }
 
-    if (g_ran != 1)      { std::printf("FAIL: the context did not run\n"); ++failures; }
-    if (g_image != 1)    { std::printf("FAIL: the declared value was not in the image\n"); ++failures; }
-    if (g_fresh != 1)    { std::printf("FAIL: the block did not begin as the image says\n"); ++failures; }
-    if (g_kept != 1)     { std::printf("FAIL: the context's writes did not survive it\n"); ++failures; }
-    if (g_isolated != 1) { std::printf("FAIL: the context's writes disturbed its own image\n"); ++failures; }
+    expect(eq(g_ran, 1))      << "the context ran";
+    expect(eq(g_image, 1))    << "the declared value was in the image";
+    expect(eq(g_fresh, 1))    << "the block began as the image says";
+    expect(eq(g_kept, 1))     << "the context's writes survived it";
+    expect(eq(g_isolated, 1)) << "the context's writes did not disturb its own image";
 
     // The starter's instance is untouched, which is the other half of
     // "distinct": one instance per context and not one shared.
     int intact = 1;
     for (int i = 0; i < kSize; ++i) if (g_block[i] != kStarter) { intact = 0; break; }
-    if (intact != 1) { std::printf("FAIL: the starting context's instance was written\n"); ++failures; }
+    expect(eq(intact, 1)) << "the starting context's instance was not written";
 
     // A second context starts from the image again, which is what makes the
     // storage per context rather than per process.
@@ -103,17 +98,7 @@ int main() {
     g_kept = 0;
     g_isolated = 0;
     kal_task u{};
-    if (kal_task_start(examine, nullptr, &u) == kal_ok && kal_task_join(u) == kal_ok
-            && g_image == 1 && g_fresh == 1 && g_kept == 1 && g_isolated == 1) {
-        // held
-    } else {
-        std::printf("FAIL: a second context did not see its own instance\n");
-        ++failures;
-    }
-
-    if (failures == 0) {
-        const char ok[] = "openkal-linux: a started context's thread-local storage\n";
-        kal::write(kal::out(), ok, sizeof(ok) - 1);
-    }
-    return failures == 0 ? 0 : 1;
-}
+    expect(kal_task_start(examine, nullptr, &u) == kal_ok && kal_task_join(u) == kal_ok
+           && g_image == 1 && g_fresh == 1 && g_kept == 1 && g_isolated == 1)
+        << "a second context sees its own instance";
+}};

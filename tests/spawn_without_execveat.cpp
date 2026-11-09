@@ -14,6 +14,9 @@
 import openkal.types;
 import openkal.fs;
 import openkal.process;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
 kal_dir root() {
@@ -37,10 +40,10 @@ bool refuse_execveat() {
 }
 }
 
-int main() {
+UTest spawn_without_execveat_test{"spawn_without_execveat", [] {
     if (!refuse_execveat()) {
-        std::printf("openkal-linux: seccomp is not available here; nothing to observe\n");
-        return 0;
+        skip("seccomp is not available here; nothing to observe");
+        return;
     }
     const kal_dir r = root();
     const char* argv[] = { "sh", "-c", "exit 7" };
@@ -51,9 +54,10 @@ int main() {
     int status = -1, terminated = 0;
     if (e == kal_ok) kal_process_wait(p, &status, &terminated);
     if (e != kal_ok || terminated != 0 || status != 7) {
-        std::printf("FAIL: a program is started where execveat answers ENOSYS (rc %d, status %d)\n", e, status);
-        return 1;
+        expect(eq(e, static_cast<int>(kal_ok))) << "a program is started where execveat answers ENOSYS";
+        expect(eq(terminated, 0)) << "and it ends of itself";
+        expect(eq(status, 7)) << "with the status it gave";
+        return;
     }
     std::printf("openkal-linux: a program is started where execveat answers ENOSYS\n");
-    return 0;
-}
+}};

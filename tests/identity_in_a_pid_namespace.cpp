@@ -14,6 +14,9 @@
 #include <unistd.h>
 import openkal.types;
 import openkal.process;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
 struct identity { kal_u64 id = 0, started = 0; int ended = 0; };
@@ -41,11 +44,11 @@ bool find(kal_u64 id, identity& out) {
 }
 }
 
-int main() {
+UTest identity_in_a_pid_namespace_test{"identity_in_a_pid_namespace", [] {
     identity outside{};
-    if (!self(outside)) { std::printf("FAIL: this program names itself\n"); return 1; }
+    if (!self(outside)) { fail("this program names itself"); return; }
     int report[2], release[2];
-    if (::pipe(report) != 0 || ::pipe(release) != 0) return 1;
+    if (::pipe(report) != 0 || ::pipe(release) != 0) { fail("two pipes are made"); return; }
     const pid_t helper = ::fork();
     if (helper == 0) {
         if (::unshare(CLONE_NEWUSER | CLONE_NEWPID) != 0) {
@@ -73,21 +76,15 @@ int main() {
     }
     identity inner{};
     (void)!::read(report[0], &inner, sizeof inner);
-    int failures = 0;
-    if (inner.id == 0) {
-        std::printf("openkal-linux: no pid namespace can be made here; nothing to observe\n");
-    } else {
+    if (inner.id != 0) {
         identity seen{};
-        if (!find(inner.id, seen) || seen.ended || seen.started != inner.started) {
-            std::printf("FAIL: outside, the program inside is not found by the number it named itself by\n");
-            ++failures;
-        }
+        expect(find(inner.id, seen) && !seen.ended && seen.started == inner.started)
+            << "outside, the program inside is found by the number it named itself by";
     }
     (void)!::write(release[1], "x", 1);
     int st = 0;
     ::waitpid(helper, &st, 0);
-    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) ++failures;
-    if (failures == 0 && inner.id != 0)
-        std::printf("openkal-linux: a program in a pid namespace is named as /proc names it, both ways\n");
-    return failures;
-}
+    expect(WIFEXITED(st) && WEXITSTATUS(st) == 0)
+        << "inside, the program names itself and finds the program outside (the helper's status)";
+    if (inner.id == 0) skip("no pid namespace can be made here; nothing to observe");
+}};

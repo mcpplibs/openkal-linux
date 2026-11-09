@@ -17,14 +17,13 @@ import openkal.env;
 import openkal.abort;
 import openkal.memory;
 import openkal.process;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
 
-int failures = 0;
-
-void check(bool held, const char* what) {
-    if (!held) { std::printf("FAIL: %s\n", what); ++failures; }
-}
+void check(bool held, const char* what) { expect(held) << what; }
 
 kal_dir here() { return kal::fs::working(); }
 
@@ -51,7 +50,7 @@ long get(const char* name, char* buf, kal_uintptr cap) {
 
 }  // namespace
 
-int main() {
+UTest conformance_additions_test{"conformance_additions", [] {
     const char* name = "okl-additions.tmp";
     const kal_uintptr n = std::strlen(name);
     char buf[256];
@@ -213,5 +212,4 @@ int main() {
     }
 
     std::printf("openkal-linux: the operations version 0.5 added\n");
-    return failures == 0 ? 0 : 1;
-}
+}};

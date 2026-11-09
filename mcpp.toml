@@ -113,3 +113,9 @@ default = []
 # implementation, and the consumer that knows which arrangement holds is the
 # one that declares it.
 standalone = { defines = ["OKL_STANDALONE"] }
+
+# The tests are written with the mtest library (mcpp-community/mtest): each file
+# declares its cases, and a test that starts a copy of itself declares what the
+# copy does as a `child'.
+[dev-dependencies]
+mcpplibs.mtest = "0.5.2"

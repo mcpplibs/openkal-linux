@@ -292,10 +292,13 @@ jobs:
             for m in $(grep -oE '^# openkal\.[a-z]+' .spec/SURFACE.txt | cut -d. -f2); do
               echo "import openkal.$m;"
             done
+            echo 'import mcpplibs.mtest;'
             echo 'const void *const surface[] = {'
             while read -r n; do [ -n "$n" ] && echo "    (const void *)&$n,"; done <<< "$list"
             echo '};'
-            echo 'int main() { return surface[0] == 0; }'
+            echo 'mcpplibs::mtest::UTest conformance_declarations{"conformance_declarations", [] {'
+            echo '    mcpplibs::mtest::expect(surface[0] != nullptr) << "every name the specification lists is declared";'
+            echo '}};'
           } > tests/conformance_declarations.cpp
           mcpp test conformance_declarations 2>&1 | tee decl.log
           grep -q '^conformance_declarations \.\.\. ok' decl.log
