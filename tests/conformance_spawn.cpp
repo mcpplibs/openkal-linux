@@ -5,24 +5,25 @@
 // the claim is about the started image and not about the caller. Two programs
 // are used. `/bin/sh' is an ordinary executable that needs nothing to survive
 // the start, so any descriptor above 2 it holds was conveyed by the start. This
-// test itself, started again with `--grant-child', reads its preopens through
+// test itself, started again as the child `grant', reads its preopens through
 // `kal_fs_preopen', which is how a granted directory is defined to arrive.
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <string>
+#include <vector>
 #include <unistd.h>
 import openkal.fs;
 import openkal.stream;
 import openkal.types;
 import openkal.process;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
 
-int failures = 0;
-
-void check(bool held, const char* what) {
-    if (!held) { std::printf("FAIL: %s\n", what); ++failures; }
-}
+void check(bool held, const char* what) { expect(held) << what; }
 
 const char kMarker[] = "okl-grant-marker";
 
@@ -47,23 +48,25 @@ bool write_marker(kal_dir d, const char* text) {
 
 // --- the started side --------------------------------------------------------
 //
-// argv: --grant-child <count|ambient> {<name> <expect>}
+// arguments: <count|ambient> {<name> <expect>}
 // <expect> is the content of the marker file in that directory, or `@<entry>'
 // for a directory entry that must exist there. The status names the first
 // disagreement, so that a failure in the caller says which one it was.
-int grant_child(int argc, char** argv) {
+int grant_child(const std::vector<std::string>& argv) {
     const kal_uintptr n = kal_fs_preopen_count();
-    if (std::strcmp(argv[2], "ambient") == 0) {
+    if (argv.empty()) return 90;
+    if (argv[0] == "ambient") {
         kal_dir d{}; char nm[8]; kal_uintptr l = 0;
         if (n != 2) return 10;
         if (kal_fs_preopen(1, &d, nm, sizeof nm, &l) != kal_ok || l != 1 || nm[0] != '/') return 11;
         return 0;
     }
-    const kal_uintptr want = static_cast<kal_uintptr>(std::atoi(argv[2]));
+    const kal_uintptr want = static_cast<kal_uintptr>(std::atoi(argv[0].c_str()));
+    if (argv.size() != 1 + 2 * want) return 91;
     if (n != want) return 20;
     for (kal_uintptr i = 0; i < want; ++i) {
-        const char* name = argv[3 + 2 * i];
-        const char* expect = argv[4 + 2 * i];
+        const char* name = argv[1 + 2 * i].c_str();
+        const char* expect = argv[2 + 2 * i].c_str();
         kal_dir d{}; char nm[256]; kal_uintptr l = 0;
         if (kal_fs_preopen(i, &d, nm, sizeof nm, &l) != kal_ok) return 30 + static_cast<int>(i);
         if (l != std::strlen(name) || std::memcmp(nm, name, l) != 0) return 40 + static_cast<int>(i);
@@ -85,6 +88,8 @@ int grant_child(int argc, char** argv) {
     return 0;
 }
 
+child grant{"grant", [](std::vector<std::string> args) { return grant_child(args); }};
+
 // --- the starting side -------------------------------------------------------
 
 char g_self[1024];
@@ -94,15 +99,16 @@ char g_self[1024];
 int run_child(const kal_preopen* grants, kal_uintptr count,
               const char* const* args, kal_uintptr nargs,
               const char** envp = nullptr, kal_uintptr envc = 0) {
-    const char* argv[16] = { "conformance_spawn", "--grant-child" };
-    kal_uintptr lens[16] = { 17, 13 };
-    for (kal_uintptr i = 0; i < nargs; ++i) { argv[2 + i] = args[i]; lens[2 + i] = std::strlen(args[i]); }
+    const std::vector<std::string> command = child_command("grant", std::vector<std::string>(args, args + nargs));
+    std::vector<const char*> argv;
+    std::vector<kal_uintptr> lens;
+    for (const auto& x : command) { argv.push_back(x.c_str()); lens.push_back(x.size()); }
     kal_uintptr elens[4] = {};
     for (kal_uintptr i = 0; i < envc; ++i) elens[i] = std::strlen(envp[i]);
     const kal_spawn how{ root(), working(), nullptr, grants, count, 0 };
     kal_process p{};
     const char* rel = g_self + 1;
-    if (kal_process_spawn(&how, rel, std::strlen(rel), argv, lens, 2 + nargs,
+    if (kal_process_spawn(&how, rel, std::strlen(rel), argv.data(), lens.data(), argv.size(),
                           envp, elens, envc, nullptr, &p) != kal_ok)
         return -1;
     int status = -1, terminated = -1;
@@ -113,9 +119,7 @@ int run_child(const kal_preopen* grants, kal_uintptr count,
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    if (argc > 2 && std::strcmp(argv[1], "--grant-child") == 0) return grant_child(argc, argv);
-
+UTest conformance_spawn_test{"conformance_spawn", [] {
     const ssize_t sl = readlink("/proc/self/exe", g_self, sizeof g_self - 1);
     check(sl > 1 && g_self[0] == '/', "the test can name its own program");
     g_self[sl > 0 ? sl : 0] = '\0';
@@ -220,7 +224,4 @@ int main(int argc, char** argv) {
     kal_fs_close_dir(b);
     kal_fs_remove(working(), da, std::strlen(da));
     kal_fs_remove(working(), db, std::strlen(db));
-
-    std::printf("openkal-linux: what a started program receives\n");
-    return failures == 0 ? 0 : 1;
-}
+}};

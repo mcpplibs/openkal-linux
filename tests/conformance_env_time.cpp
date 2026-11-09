@@ -2,21 +2,15 @@
 import openkal.env;
 import openkal.time;
 import openkal.stream;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
-int failures = 0;
-void check(bool ok, const char* what) {
-    if (ok) return;
-    ++failures;
-    const char pre[] = "FAIL: ";
-    kal::write(kal::err(), pre, sizeof(pre) - 1);
-    kal_uintptr n = 0; while (what[n]) ++n;
-    kal::write(kal::err(), what, n);
-    kal::write(kal::err(), "\n", 1);
-}
+void check(bool ok, const char* what) { expect(ok) << what; }
 }
 
-int main() {
+UTest conformance_env_time_test{"conformance_env_time", [] {
     // A program always receives the name it was started with, even where the
     // environment has none, in which case it is empty rather than absent.
     check(kal::env::arg_count() >= 1, "at least the program name is present");
@@ -53,5 +47,4 @@ int main() {
 
     const char ok[] = "openkal-linux: env and time conformance\n";
     kal::write(kal::out(), ok, sizeof(ok) - 1);
-    return failures == 0 ? 0 : 1;
-}
+}};

@@ -1,7 +1,7 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-linux"
-version     = "0.25.0"
+version     = "0.26.0"
 description = "The reference implementation of openkal for Linux, written on the kernel's own system-call interface so that it can be placed beneath a C library as well as above one."
 license     = "Apache-2.0"
 
@@ -67,7 +67,7 @@ provides-interfaces = [
 ]
 
 [dependencies]
-openkal = "0.24.0"
+openkal = "0.25.0"
 
 # The package contributes definitions and no modules. The interface it
 # implements is declared by the specification package, which this package
@@ -113,3 +113,9 @@ default = []
 # implementation, and the consumer that knows which arrangement holds is the
 # one that declares it.
 standalone = { defines = ["OKL_STANDALONE"] }
+
+# The tests are written with the mtest library (mcpp-community/mtest): each file
+# declares its cases, and a test that starts a copy of itself declares what the
+# copy does as a `child'.
+[dev-dependencies]
+mcpplibs.mtest = "0.5.2"

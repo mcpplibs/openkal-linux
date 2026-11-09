@@ -18,12 +18,12 @@ import openkal.fs;
 import openkal.stream;
 import openkal.types;
 import openkal.process;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
-int failures = 0;
-void check(bool held, const char* what) {
-    if (!held) { std::printf("FAIL: %s\n", what); ++failures; }
-}
+void check(bool held, const char* what) { expect(held) << what; }
 
 kal_dir root() {
     for (kal_uintptr i = 0; i < kal::fs::preopen_count(); ++i) {
@@ -35,7 +35,7 @@ kal_dir root() {
 }
 }
 
-int main() {
+UTest search_only_base_test{"search_only_base", [] {
     const auto work = kal::fs::working();
     check(kal_fs_mkdir(work, "okl_search_only", 15) == kal_ok, "a directory is created");
     kal_dir d{};
@@ -83,7 +83,4 @@ int main() {
     ::chmod("okl_search_only", 0755);
     ::unlink("okl_search_only/inside");
     ::rmdir("okl_search_only");
-
-    if (failures == 0) std::printf("search_only_base: ok\n");
-    return failures == 0 ? 0 : 1;
-}
+}};

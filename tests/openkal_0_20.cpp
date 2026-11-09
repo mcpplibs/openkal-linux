@@ -14,18 +14,12 @@ import openkal.stream;
 import openkal.task;
 import openkal.time;
 import openkal.types;
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
 
 namespace {
-int failures = 0;
-void check(bool ok, const char* what) {
-    if (ok) return;
-    ++failures;
-    const char pre[] = "FAIL: ";
-    kal::write(kal::err(), pre, sizeof(pre) - 1);
-    kal_uintptr n = 0; while (what[n]) ++n;
-    kal::write(kal::err(), what, n);
-    kal::write(kal::err(), "\n", 1);
-}
+void check(bool ok, const char* what) { expect(ok) << what; }
 
 constexpr kal_uintptr kSize = 1u << 16;
 constexpr char kName[] = "openkal-0-20-at-offsets.tmp";
@@ -60,7 +54,7 @@ void read_clock(void* arg) {
 }
 }  // namespace
 
-int main() {
+UTest openkal_0_20_test{"openkal_0_20", [] {
     const kal_dir here = kal::fs::working();
     {
         kal_file f{};
@@ -110,5 +104,4 @@ int main() {
         check(b > a && b - a >= 19u * 1000u * 1000u && b - a < 1000u * 1000u * 1000u,
               "the wall clock advances with a sleep, and by about as much");
     }
-    return failures == 0 ? 0 : 1;
-}
+}};

@@ -36,8 +36,12 @@ env:
   # fails with exit 2. This is the CI pin -- what this repository is
   # tested against -- and not a floor: nothing here records a minimum
   # engine for consumers.
-  MCPP_VERSION: 2026.11.5.1
+  MCPP_VERSION: 2026.11.9.1
   XLINGS_VERSION: v2026.10.26.1
+  # The mtest engine the runs are reported with: the conformance suite's cases
+  # (tools/run-conformance.sh with MTEST set) and `mcpp test`'s store (target/mtest).
+  MTEST_VERSION: 0.5.2
+  MTEST_SHA256: be443f8c546b3f4628dcd3f1eb6f45b4d698a7f805232f966349faf8250863c6
   XLINGS_NON_INTERACTIVE: '1'
 
 jobs:
@@ -176,6 +180,8 @@ jobs:
           esac
           mcpp toolchain list
 
+      - uses: ./.github/actions/mtest
+
       - name: Every interface, every kind of examination
         run: |
           # `optional` IS PART OF THE SET AND WAS NOT, WHICH MADE THE STEP'S
@@ -214,6 +220,11 @@ jobs:
             grep -q "^$name \.\.\. ok" tests.log || { echo "did not run or did not pass: $name" >&2; missing=1; }
           done
           test "$missing" -eq 0
+
+      - name: This package's test runs, kept for the report
+        if: always()
+        run: |
+          if [ -d target/mtest ]; then cp -R target/mtest "$RUNNER_TEMP/mcpp-test-runs"; fi
 
       - name: The exported surface is complete and contains nothing else
         run: |
@@ -281,10 +292,13 @@ jobs:
             for m in $(grep -oE '^# openkal\.[a-z]+' .spec/SURFACE.txt | cut -d. -f2); do
               echo "import openkal.$m;"
             done
+            echo 'import mcpplibs.mtest;'
             echo 'const void *const surface[] = {'
             while read -r n; do [ -n "$n" ] && echo "    (const void *)&$n,"; done <<< "$list"
             echo '};'
-            echo 'int main() { return surface[0] == 0; }'
+            echo 'mcpplibs::mtest::UTest conformance_declarations{"conformance_declarations", [] {'
+            echo '    mcpplibs::mtest::expect(surface[0] != nullptr) << "every name the specification lists is declared";'
+            echo '}};'
           } > tests/conformance_declarations.cpp
           mcpp test conformance_declarations 2>&1 | tee decl.log
           grep -q '^conformance_declarations \.\.\. ok' decl.log
@@ -466,3 +480,64 @@ jobs:
           fi
           rm -f src/probe.cpp
           echo "a dependence upon a C library is visible to the check"
+
+      # A FAILED RUN, EXPLAINED: through the engine the suite's own text is not in
+      # the log, so the failing cases are named here with what each observed.
+      - name: The failing cases, explained
+        if: failure()
+        run: |
+          [ -n "${MTEST:-}" ] && [ -d .spec/conformance/.mtest ] || exit 0
+          ( cd .spec/conformance && "$MTEST" explain ) || true
+
+      # THE RUNS OF THIS JOB, REPORTED: the conformance suite's (one case per
+      # interface, its observations within it) and `mcpp test`'s (one case per
+      # test program), taken into one store, written as the job's summary and kept
+      # for the report over every job.
+      - name: The runs, reported
+        if: always()
+        run: |
+          [ -n "${MTEST:-}" ] || { echo "no mtest engine in this job"; exit 0; }
+          store="$(cygpath -u "$RUNNER_TEMP" 2> /dev/null || printf '%s' "$RUNNER_TEMP")/mtest-store"
+          mkdir -p "$store"; here="$PWD"
+          for from in "$here/.spec/conformance/.mtest" "$RUNNER_TEMP/mcpp-test-runs"; do
+            if [ -f "$from/index.ndjson" ]; then ( cd "$store" && "$MTEST" store import --from "$from" ); fi
+          done
+          [ -f "$store/.mtest/index.ndjson" ] || { echo "no run was kept"; exit 0; }
+          ( cd "$store" && "$MTEST" report --format md --group "$GITHUB_RUN_ID" ) >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mtest-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/mtest-store/.mtest
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # EVERY JOB'S RUNS AS ONE REPORT (`mtest ci report`, the workflow run's group).
+  report:
+    name: tests (report)
+    needs: conformance
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mtest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mtest-*
+          path: ${{ runner.temp }}/stores
+      - name: Every job's runs, reported together
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          for store in "$RUNNER_TEMP"/stores/*/; do
+            [ -f "$store/index.ndjson" ] || continue
+            "$MTEST" store import --from "$store"
+            found=1
+          done
+          if [ "$found" = 0 ]; then echo "no job kept a run" >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          "$MTEST" ci report --out "$RUNNER_TEMP/tests.md"
