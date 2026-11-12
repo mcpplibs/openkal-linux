@@ -594,21 +594,17 @@ void kal_fs_close_dir(kal_dir d) {
     // directory whose enumerations are not this one's.
     listings_end(fd);
     okl::rights::forget(fd);
-    okl::retire(d.h); okl::sys(okl::nr_close, fd);
+    okl::release(d.h);
 }
 
-void kal_fs_close_file(kal_file f) {
-    const int fd = okl::unpack(f.h);
-    if (fd >= 0) { okl::retire(f.h); okl::sys(okl::nr_close, fd); }
-}
+void kal_fs_close_file(kal_file f) { okl::release(f.h); }
 
 // A file's stream is the file. The descriptor is what openkal.stream's handle
 // holds on this implementation, so no conversion is required and none is
 // performed: the two interfaces agree because both are descriptor-shaped here,
 // which is a property of this implementation and not of the specification.
 kal_stream kal_fs_stream(kal_file f) {
-    const int fd = okl::unpack(f.h);
-    return kal_stream{ fd < 0 ? 0u : static_cast<kal_uintptr>(fd) };
+    return kal_stream{ okl::stream_word(f.h) };
 }
 
 // The greatest length of a name this implementation accepts.
