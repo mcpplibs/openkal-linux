@@ -8,8 +8,29 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.25.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.26.0"
+openkal-linux = "0.26.1"
 ```
+
+## What 0.26.1 corrects
+
+**A handle is retired before its descriptor is closed.** A connection, a listener
+and a datagram socket were closed first and retired second. The kernel gives a
+closed number to the next open in any context, so a file opened by another context
+between the two took the number with the generation the socket's handle still had,
+and the retire then made the file's handle stale: its stream was answered as zero,
+which is standard input, its reads returned nothing of the file, and its descriptor
+was never closed (#53; measured there at about 150 files a second on four
+processors, and 94 in 3.4 million opens by this package's test). Every release is
+now one function, which retires and then closes.
+
+**One release closes.** The generation is advanced by a compare-and-exchange from
+the value the handle carries, so a second release of the same word, in the same
+context or another, closes nothing. It is read and advanced through the atomic
+operations.
+
+**A released handle's stream is no stream.** `kal_fs_stream` and `kal_net_stream`
+answer a handle that names no live descriptor with a word no descriptor has, and a
+transfer upon it reports `kal_err_invalid`. They answered zero.
 
 ## What 0.26 adds (openkal 0.25)
 
