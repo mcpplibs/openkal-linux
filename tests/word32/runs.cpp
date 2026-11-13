@@ -7,6 +7,7 @@
 #include <openkal/task.h>
 #include <openkal/time.h>
 #include <openkal/abort.h>
+#include <openkal/process.h>
 
 static int failures = 0;
 static void say(const char* s) { kal_uintptr n = 0; while (s[n]) ++n; kal_stream_write(kal_stdout(), s, n); }
@@ -52,6 +53,18 @@ extern "C" int main(int, char**, char**) {
     const kal_duration before = kal_time_monotonic();
     kal_time_sleep(20u * 1000u * 1000u);
     check(kal_time_monotonic() - before >= 20u * 1000u * 1000u, "a sleep of 20 ms lasts at least that");
+    // The processor time is read through the sixty-four bit clock as well: worked for about
+    // 50 ms, it is more than 10 ms and less than the time since the program started.
+    const kal_duration spin = kal_time_monotonic();
+    volatile kal_u64 sink = 0;
+    while (kal_time_monotonic() - spin < 50u * 1000u * 1000u) sink = sink + 1;
+    kal_process me{};
+    kal_program_info pi{}; pi.self_size = sizeof pi;
+    check(kal_process_self(&me) == kal_ok && kal_process_info(me, KAL_PINFO_CPU, &pi) == kal_ok
+              && (pi.present & KAL_PINFO_CPU) && pi.cpu_ns > 10u * 1000u * 1000u
+              && pi.cpu_ns < kal_time_monotonic() - before + 1000u * 1000u * 1000u,
+          "the processor time counts the work done");
+    kal_process_close(me);
     say(failures ? "FAILED\n" : "all held\n");
     return failures;
 }

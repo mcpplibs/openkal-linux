@@ -1480,7 +1480,7 @@ okl_u64 ticks_to_ns(okl_u64 t) {
 bool cpu_ns(okl_long pid, bool self, okl_u64& out) {
     const okl_long clock = self ? 2 /* CLOCK_PROCESS_CPUTIME_ID */
                                 : static_cast<okl_long>(static_cast<int>((~static_cast<unsigned>(pid)) << 3) | 2);
-    struct { okl_long sec, nsec; } ts{};
+    okl::ktimespec ts{};  // the time64 record on i386 (sys.h)
     const okl_long r = okl::sys(okl::nr_clock_gettime, clock, reinterpret_cast<okl_long>(&ts));
     if (!okl::failed(r)) {
         out = static_cast<okl_u64>(ts.sec) * 1000000000ull + static_cast<okl_u64>(ts.nsec);

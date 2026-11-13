@@ -464,9 +464,9 @@ struct ring {
 ring g_ring;
 
 okl_u64 monotonic() {
-    struct { okl_long s, ns; } t{};
+    okl::ktimespec t{};  // the time64 record on i386 (sys.h)
     okl::sys(okl::nr_clock_gettime, 1 /* CLOCK_MONOTONIC */, reinterpret_cast<okl_long>(&t));
-    return static_cast<okl_u64>(t.s) * 1000000000ull + static_cast<okl_u64>(t.ns);
+    return static_cast<okl_u64>(t.sec) * 1000000000ull + static_cast<okl_u64>(t.nsec);
 }
 
 void sample(void* uc) {
