@@ -54,6 +54,12 @@ okl_u64 gnu_symbol_count(const unsigned* h) {
 }
 
 vdso_clock find_vdso_clock() {
+#if defined(__i386__)
+    // This architecture's object is ELF32 and its clock entry takes the
+    // thirty-two bit record; the call below is the sixty-four bit form
+    // (clock_gettime64), which clause 5.5 asks for.
+    return nullptr;
+#endif
     const okl_ulong base = okl::auxval(33 /* AT_SYSINFO_EHDR */);
     if (base == 0) return nullptr;
     const auto* eh = reinterpret_cast<const elf_ehdr*>(base);
@@ -133,8 +139,7 @@ void kal_time_sleep(kal_duration ns) {
     // writes what is left into the same structure, which is why it is not
     // const.
     for (;;) {
-        const okl_long r = okl::sys(okl::nr_nanosleep, reinterpret_cast<okl_long>(&req),
-                                    reinterpret_cast<okl_long>(&req));
+        const okl_long r = okl::nanosleep(&req, &req);
         if (!okl::interrupted(r)) return;
     }
 }

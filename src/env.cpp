@@ -136,8 +136,7 @@ bool recover(char*** argv_out, int* argc_out, char*** envp_out) {
 // with. What was found here is recorded, and `kal_process_start' gives a
 // started program the disposition this one was started with (process.cpp).
 [[gnu::constructor(101)]] void quiet_the_signal_openkal_cannot_report() {
-    // struct k_sigaction as this kernel takes it: handler, flags, restorer, mask.
-    struct k_sigaction { void* handler; unsigned long flags; void* restorer; unsigned long mask; };
+    using okl::k_sigaction;
     k_sigaction ignore{ reinterpret_cast<void*>(1) /* SIG_IGN */, 0, nullptr, 0 };
     k_sigaction found{};
     if (!okl::failed(okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,

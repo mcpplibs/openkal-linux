@@ -76,6 +76,21 @@ __asm__(
 "  hlt\n"
 ".size _start,.-_start\n"
 );
+#elif defined(__i386__)
+__asm__(
+".text\n"
+".globl _start\n"
+".type _start,@function\n"
+"_start:\n"
+"  xor %ebp,%ebp\n"        // the outermost frame has no caller
+"  mov %esp,%eax\n"        // the kernel left everything here
+"  and $-16,%esp\n"
+"  sub $12,%esp\n"         // sixteen-byte aligned at the call, after the argument
+"  push %eax\n"
+"  call __okl_start_c\n"
+"  hlt\n"
+".size _start,.-_start\n"
+);
 #elif defined(__aarch64__)
 __asm__(
 ".text\n"

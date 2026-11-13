@@ -63,7 +63,7 @@ extern "C" {
 void* kal_exec_alloc(kal_uintptr size) {
     if (size == 0) return nullptr;
     const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), page());
-    const okl_long r = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(bytes),
+    const okl_long r = okl::mmap( 0, static_cast<okl_long>(bytes),
                                 okl::prot_read | okl::prot_write,
                                 okl::map_private | okl::map_anonymous, -1, 0);
     if (okl::failed(r)) return nullptr;
@@ -78,7 +78,7 @@ void* kal_exec_alloc_at(void* at, kal_uintptr size) {
     const okl_uptr where = reinterpret_cast<okl_uptr>(at);
     if (size == 0 || where == 0 || (where & (page() - 1)) != 0) return nullptr;
     const okl_uptr bytes = round_up(static_cast<okl_uptr>(size), page());
-    const okl_long r = okl::sys(okl::nr_mmap, static_cast<okl_long>(where), static_cast<okl_long>(bytes),
+    const okl_long r = okl::mmap( static_cast<okl_long>(where), static_cast<okl_long>(bytes),
                                 okl::prot_read | okl::prot_write,
                                 okl::map_private | okl::map_anonymous | 0x100000 /* MAP_FIXED_NOREPLACE */,
                                 -1, 0);
@@ -189,7 +189,7 @@ int kal_exec_map_part(void* region, kal_uintptr offset, kal_uintptr size, kal_fi
         || ((how & KAL_EXEC_MAP_WRITE) && (how & KAL_EXEC_MAP_EXECUTE)))
         return kal_err_invalid;
     okl::kstat st{};
-    const okl_long s = okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&st));
+    const okl_long s = okl::fstat(fd, &st);
     if (okl::failed(s)) return okl::translate(s);
     if ((st.mode & okl::s_ifmt) != okl::s_ifreg) return kal_err_not_supported;
     const kal_u64 length = st.size > 0 ? static_cast<kal_u64>(st.size) : 0;
@@ -205,10 +205,10 @@ int kal_exec_map_part(void* region, kal_uintptr offset, kal_uintptr size, kal_fi
                         | ((how & KAL_EXEC_MAP_WRITE) ? okl::prot_write : 0)
                         | (bti ? 0x10 /* PROT_BTI */ : 0);
     const okl_long populate = (how & KAL_EXEC_MAP_PREFETCH) ? 0x8000 /* MAP_POPULATE */ : 0;
-    const okl_long r = okl::sys(okl::nr_mmap,
+    const okl_long r = okl::mmap(
                                 reinterpret_cast<okl_long>(static_cast<char*>(region) + offset),
                                 static_cast<okl_long>(size), prot, okl::map_private | okl::map_fixed | populate, fd,
-                                static_cast<okl_long>(at));
+                                static_cast<okl_i64>(at));
     if (okl::failed(r)) {
         // ENODEV: the file system does not map. EPERM: its files are not
         // executed (a volume mounted noexec). The resource refuses, not the

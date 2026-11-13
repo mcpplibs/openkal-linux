@@ -55,7 +55,7 @@ int class_of(okl_uptr n) {
 okl_uptr size_of(int c) { return kMinBlock << c; }
 
 void* map(okl_uptr bytes) {
-    const okl_long r = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(bytes),
+    const okl_long r = okl::mmap( 0, static_cast<okl_long>(bytes),
                                 okl::prot_read | okl::prot_write,
                                 okl::map_private | okl::map_anonymous, -1, 0);
     if (okl::failed(r)) return nullptr;
@@ -98,7 +98,7 @@ void* carve(int c) {
 
 // The whole of a small file of the kernel's, into `b'; its length, or 0.
 okl_uptr read_small(const char* path, char* b, okl_uptr cap) {
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+    const okl_long fd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>(path),
                                  okl::o_rdonly | okl::o_cloexec, 0);
     if (okl::failed(fd)) return 0;
     okl_uptr n = 0;

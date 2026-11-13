@@ -18,13 +18,18 @@
 // The return from a handler: this kernel requires the restorer of a handler
 // installed without a C library to be named.
 #if defined(__x86_64__)
-extern "C" void okl_signal_return();
 __asm__(".text\n.globl okl_signal_return\n.type okl_signal_return,@function\nokl_signal_return:\n"
         "  mov $15, %eax\n  syscall\n  hlt\n");
+#elif defined(__i386__)
+__asm__(".text\n.globl okl_signal_return\n.type okl_signal_return,@function\nokl_signal_return:\n"
+        "  mov $173, %eax\n  int $0x80\n  hlt\n");
 #elif defined(__aarch64__)
-extern "C" void okl_signal_return();
 __asm__(".text\n.globl okl_signal_return\n.type okl_signal_return,@function\nokl_signal_return:\n"
         "  mov x8, #139\n  svc #0\n");
+#endif
+#if defined(__x86_64__) || defined(__i386__) || defined(__aarch64__)
+extern "C" void okl_signal_return();
+void* okl::signal_return() { return reinterpret_cast<void*>(&okl_signal_return); }
 #endif
 extern "C" void okl_fault_handler(int signo, void* info, void* uc);
 extern "C" void okl_sample_handler(int signo, void* info, void* uc);
@@ -83,7 +88,7 @@ okl_uptr parse_hex(const char*& p) {
 }
 
 bool locate(okl_uptr addr, where_t& w) {
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>("/proc/self/maps"),
+    const okl_long fd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>("/proc/self/maps"),
                                  okl::o_rdonly | okl::o_cloexec, 0);
     if (okl::failed(fd)) return false;
     char buf[4096];
@@ -122,17 +127,29 @@ bool locate(okl_uptr addr, where_t& w) {
 }
 
 // --- the symbol that covers an offset of an ELF file --------------------------
+// The records of this program's own class: a process maps files of its class
+// only, ELF32 on i386 (whose records order some fields otherwise) and ELF64
+// elsewhere. The names keep the 64 of the form they were written for.
+#if defined(__i386__)
+constexpr unsigned char elf_class = 1;
+struct ehdr64 { unsigned char ident[16]; okl_u32 tv; okl_u32 version; okl_u32 entry, phoff, shoff;
+                okl_u32 flags; unsigned short ehsize, phentsize, phnum, shentsize, shnum, shstrndx; };
+struct phdr64 { okl_u32 type, offset, vaddr, paddr, filesz, memsz, flags, align; };
+struct shdr64 { okl_u32 name, type, flags, addr, offset, size, link, info, align, entsize; };
+struct sym64  { okl_u32 name, value, size; unsigned char info, other; unsigned short shndx; };
+#else
+constexpr unsigned char elf_class = 2;
 struct ehdr64 { unsigned char ident[16]; okl_u32 tv; okl_u32 version; okl_u64 entry, phoff, shoff;
                 okl_u32 flags; unsigned short ehsize, phentsize, phnum, shentsize, shnum, shstrndx; };
 struct phdr64 { okl_u32 type, flags; okl_u64 offset, vaddr, paddr, filesz, memsz, align; };
 struct shdr64 { okl_u32 name, type; okl_u64 flags, addr, offset, size; okl_u32 link, info; okl_u64 align, entsize; };
 struct sym64  { okl_u32 name; unsigned char info, other; unsigned short shndx; okl_u64 value, size; };
+#endif
 
 bool pread_all(int fd, void* out, okl_uptr n, okl_u64 at) {
     okl_uptr got = 0;
     while (got < n) {
-        const okl_long r = okl::sys(okl::nr_pread64, fd, reinterpret_cast<okl_long>(static_cast<char*>(out) + got),
-                                    static_cast<okl_long>(n - got), static_cast<okl_long>(at + got));
+        const okl_long r = okl::pread(fd, static_cast<char*>(out) + got, static_cast<okl_uptr>(n - got), static_cast<okl_i64>(at + got));
         if (r == -okl::e_intr) continue;
         if (r <= 0) return false;
         got += static_cast<okl_uptr>(r);
@@ -144,14 +161,14 @@ bool pread_all(int fd, void* out, okl_uptr n, okl_u64 at) {
 // and the distance into it; false where the file has no such symbol.
 bool symbol_at(const char* file, okl_uptr off, char* name, okl_uptr cap, okl_uptr& len, okl_uptr& delta,
                okl_uptr& sym_vaddr, okl_uptr& vaddr_out) {
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(file),
+    const okl_long fd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>(file),
                                  okl::o_rdonly | okl::o_cloexec, 0);
     if (okl::failed(fd)) return false;
     bool ok = false;
     ehdr64 eh{};
     do {
         if (!pread_all(static_cast<int>(fd), &eh, sizeof eh, 0)) break;
-        if (eh.ident[0] != 0x7f || eh.ident[1] != 'E' || eh.ident[4] != 2) break;
+        if (eh.ident[0] != 0x7f || eh.ident[1] != 'E' || eh.ident[4] != elf_class) break;
         // The offset as an address of the file: the loadable segment holding it.
         okl_uptr vaddr = ~okl_uptr{0};
         for (unsigned i = 0; i < eh.phnum; ++i) {
@@ -214,6 +231,12 @@ frame_regs from_context(void* uc) {
     okl::copy(&r.pc, b + 40 + 16 * 8, 8);
     okl::copy(&r.fp, b + 40 + 10 * 8, 8);
     okl::copy(&r.sp, b + 40 + 15 * 8, 8);
+#elif defined(__i386__)
+    // struct ucontext: flags, link, stack (12), then the sigcontext's registers
+    // as words: gs fs es ds edi esi ebp esp ebx edx ecx eax trapno err eip.
+    okl::copy(&r.pc, b + 20 + 14 * 4, 4);
+    okl::copy(&r.fp, b + 20 + 6 * 4, 4);
+    okl::copy(&r.sp, b + 20 + 7 * 4, 4);
 #elif defined(__aarch64__)
     // flags, link, stack (24), the signal mask with its reserve (128), then
     // the sigcontext at a sixteen-byte boundary: fault address, x0..x30, sp, pc.
@@ -231,7 +254,7 @@ int walk(frame_regs r, okl_uptr* pcs, int max) {
     if (r.pc && n < max) pcs[n++] = r.pc;
     okl_uptr fp = r.fp;
     for (int i = 0; i < 256 && n < max; ++i) {
-        if (fp == 0 || (fp & 7) != 0 || fp < r.sp) break;
+        if (fp == 0 || (fp & (sizeof(okl_uptr) - 1)) != 0 || fp < r.sp) break;
         okl_uptr pair[2];
         if (!peek(fp, pair, sizeof pair)) break;
         if (pair[1] == 0) break;
@@ -263,7 +286,10 @@ const char* fault_name(int signo, int code) {
     }
 }
 
-struct siginfo_head { int signo, errnum, code, pad; okl_uptr addr; };
+// signal, error, code, then the union at a pointer's alignment (okl::si_fields_at): a
+// fault's address first --- offset 16 on a sixty-four bit word, 12 on i386.
+struct siginfo_head { int signo, errnum, code; alignas(sizeof(void*)) okl_uptr addr; };
+static_assert(__builtin_offsetof(siginfo_head, addr) == okl::si_fields_at, "siginfo_t");
 
 void report(int signo, void* info, void* uc) {
     const auto* si = static_cast<const siginfo_head*>(info);
@@ -282,7 +308,7 @@ void report(int signo, void* info, void* uc) {
 
 
 
-struct k_sigaction { void* handler; unsigned long flags; void* restorer; unsigned long mask; };
+using okl::k_sigaction;
 constexpr unsigned long sa_siginfo = 4, sa_onstack = 0x08000000, sa_restorer = 0x04000000,
                         sa_resethand = 0x80000000, sa_restart = 0x10000000;
 
@@ -347,7 +373,7 @@ bool g_segv_replaced = false;
 // The protection of the pages of [from, to) from /proc/self/maps: one for all
 // of them, or -1.
 int protection_of(okl_uptr from, okl_uptr to) {
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>("/proc/self/maps"),
+    const okl_long fd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>("/proc/self/maps"),
                                  okl::o_rdonly | okl::o_cloexec, 0);
     if (okl::failed(fd)) return -1;
     char buf[4096], ln[1024];
@@ -509,7 +535,7 @@ int kal_prof_sample_begin(kal_u32 per_second) {
         // resident once a sample is written to it.
         constexpr okl_uptr cap = 65536;
         const okl_uptr bytes = cap * sizeof(kal_prof_sample) + cap * sizeof(okl_uptr);
-        const okl_long m = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(bytes),
+        const okl_long m = okl::mmap( 0, static_cast<okl_long>(bytes),
                                     okl::prot_read | okl::prot_write, okl::map_private | okl::map_anonymous, -1, 0);
         if (okl::failed(m)) return kal_err_no_memory;
         g_ring.slots = reinterpret_cast<kal_prof_sample*>(m);
@@ -565,7 +591,7 @@ int kal_prof_touch_begin(const void* at, kal_uintptr size) {
     g_touch_page = g;
     if (!g_touches.pages) {
         constexpr okl_uptr cap = 65536;
-        const okl_long m = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(cap * 2 * sizeof(okl_uptr)),
+        const okl_long m = okl::mmap( 0, static_cast<okl_long>(cap * 2 * sizeof(okl_uptr)),
                                     okl::prot_read | okl::prot_write, okl::map_private | okl::map_anonymous, -1, 0);
         if (okl::failed(m)) return kal_err_no_memory;
         g_touches.pages = reinterpret_cast<okl_uptr*>(m);
@@ -573,7 +599,7 @@ int kal_prof_touch_begin(const void* at, kal_uintptr size) {
         g_touches.cap = cap;
     }
     const okl_uptr bits = (size / g + 7) / 8;
-    const okl_long b = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(bits), okl::prot_read | okl::prot_write,
+    const okl_long b = okl::mmap( 0, static_cast<okl_long>(bits), okl::prot_read | okl::prot_write,
                                 okl::map_private | okl::map_anonymous, -1, 0);
     if (okl::failed(b)) return kal_err_no_memory;
     // The handler resolves the touches, whoever holds SIGSEGV.

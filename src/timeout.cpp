@@ -163,7 +163,7 @@ int kal_timeout_wait_process(kal_process p, kal_u64 ns, int* status, int* termin
             continue;
         }
         okl::ktimespec ts{ 0, static_cast<okl_i64>(interval_ns) };
-        okl::sys(okl::nr_nanosleep, reinterpret_cast<okl_long>(&ts), 0);
+        okl::nanosleep(&ts, nullptr);
         waited += interval_ns;
     }
 }

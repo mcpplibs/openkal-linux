@@ -35,6 +35,7 @@ using okl_ulong = unsigned long;
 using okl_u64   = unsigned long long;
 using okl_i64   = long long;
 using okl_u32   = unsigned;
+using okl_i32   = int;
 using okl_uptr  = __UINTPTR_TYPE__;
 
 namespace okl {
@@ -244,8 +245,105 @@ enum : okl_long {
     nr_landlock_restrict_self = 446, nr_sysinfo = 179,
 };
 
+#elif defined(__i386__)
+
+// THE GATE IS `int $0x80', AND THE SIXTH ARGUMENT IS IN THE FRAME POINTER. The
+// kernel's i386 convention takes the number in eax and the arguments in ebx,
+// ecx, edx, esi, edi and ebp. ebp cannot be named as an operand of an inline
+// statement in a function that has a frame, so the sixth is pushed first and
+// moved into ebp between saving and restoring it --- the sequence every C
+// library for this architecture uses.
+inline okl_long sys(okl_long n) {
+    okl_long r;
+    __asm__ __volatile__("int $0x80" : "=a"(r) : "a"(n) : "memory");
+    return r;
+}
+inline okl_long sys(okl_long n, okl_long a) {
+    okl_long r;
+    __asm__ __volatile__("int $0x80" : "=a"(r) : "a"(n), "b"(a) : "memory");
+    return r;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b) {
+    okl_long r;
+    __asm__ __volatile__("int $0x80" : "=a"(r) : "a"(n), "b"(a), "c"(b) : "memory");
+    return r;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c) {
+    okl_long r;
+    __asm__ __volatile__("int $0x80" : "=a"(r) : "a"(n), "b"(a), "c"(b), "d"(c) : "memory");
+    return r;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d) {
+    okl_long r;
+    __asm__ __volatile__("int $0x80" : "=a"(r) : "a"(n), "b"(a), "c"(b), "d"(c), "S"(d) : "memory");
+    return r;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d, okl_long e) {
+    okl_long r;
+    __asm__ __volatile__("int $0x80" : "=a"(r) : "a"(n), "b"(a), "c"(b), "d"(c), "S"(d), "D"(e) : "memory");
+    return r;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d, okl_long e, okl_long f) {
+    okl_long r;
+    __asm__ __volatile__("pushl %7\n\tpush %%ebp\n\tmov 4(%%esp),%%ebp\n\tint $0x80\n\t"
+                         "pop %%ebp\n\tadd $4,%%esp"
+                         : "=a"(r)
+                         : "a"(n), "b"(a), "c"(b), "d"(c), "S"(d), "D"(e), "g"(f)
+                         : "memory");
+    return r;
+}
+
+// THE NUMBERS ARE THIS ARCHITECTURE'S OWN TABLE (arch/x86/entry/syscalls/
+// syscall_32.tbl), and where a call has a sixty-four bit time form the name
+// below is that form (clause 5.5 of the specification): clock_gettime64,
+// clock_getres_time64, ppoll_time64, futex_time64 and utimensat_time64 take the
+// same arguments as the names they stand for, with the kernel's sixty-four bit
+// timespec, which is `ktimespec'. The calls whose ARGUMENTS differ here --- an
+// offset in two words, a record of another layout, another order --- have no
+// number of the common name; they are reached through the functions below the
+// tables, which every caller uses on every architecture.
+enum : okl_long {
+    nr_read = 3, nr_write = 4, nr_close = 6, nr_fstat = -1, nr_lseek = -1,
+    nr_mmap = -1, nr_mprotect = 125, nr_munmap = 91, nr_ioctl = 54, nr_msync = 144,
+    nr_readv = 145, nr_writev = 146, nr_sched_yield = 158, nr_nanosleep = -1,
+    nr_getpid = 20, nr_clone = 120, nr_execve = 11, nr_exit = 1, nr_wait4 = 114,
+    nr_kill = 37, nr_ftruncate = -1, nr_getcwd = 183, nr_fsync = 118,
+    nr_fcntl = 221 /* fcntl64: the record locks' positions are sixty-four bits */,
+    nr_prctl = 172, nr_sched_getaffinity = 242, nr_getppid = 64,
+    nr_arch_prctl = -1, nr_gettid = 224, nr_futex = 422,
+    nr_getdents64 = 220, nr_set_tid_address = 258, nr_clock_gettime = 403,
+    nr_clock_getres = 406, nr_exit_group = 252, nr_tgkill = 270,
+    nr_openat = 295, nr_mkdirat = 296, nr_newfstatat = -1, nr_unlinkat = 301,
+    nr_renameat = 302, nr_readlinkat = 305, nr_dup3 = 330, nr_execveat = 358,
+    nr_close_range = 436, nr_prlimit64 = 340,
+    nr_dup2 = 63, nr_utimensat = 412, nr_symlinkat = 304, nr_linkat = 303, nr_fstatfs = -1,
+    nr_getrandom = 355, nr_sched_setscheduler = 156,
+    nr_mincore = 218,
+    nr_fchmodat = 306,
+    nr_fchdir = 133, nr_setpgid = 57, nr_getpgid = 132, nr_rt_sigaction = 174,
+    // Each call of a socket has its own number from kernel 4.3; `accept' has
+    // none here, and `accept4' with no flags is the same call.
+    nr_socket = 359, nr_connect = 362, nr_accept = -1, nr_sendto = 369,
+    nr_recvfrom = 371, nr_shutdown = 373, nr_bind = 361, nr_listen = 363,
+    nr_getsockname = 367, nr_getpeername = 368, nr_accept4 = 364,
+    nr_setsockopt = 366, nr_pipe2 = 331,
+    nr_ppoll = 414,
+    nr_renameat2 = 353, nr_pidfd_open = 434, nr_waitid = 284,
+    nr_rt_sigprocmask = 175,
+    nr_pread64 = -1, nr_pwrite64 = -1, nr_madvise = 219, nr_faccessat = 307,
+    nr_mseal = 462, nr_statx = 383, nr_getrusage = 77, nr_sigaltstack = 186,
+    nr_setitimer = 104, nr_rt_sigreturn = 173, nr_process_vm_readv = 347,
+    nr_landlock_create_ruleset = 444, nr_landlock_add_rule = 445,
+    nr_landlock_restrict_self = 446, nr_sysinfo = 116,
+    // Only here: the forms the functions below reach, and the thread pointer's
+    // segment.
+    nr_llseek = 140, nr_mmap2 = 192, nr_ftruncate64 = 194, nr_pread64_32 = 180,
+    nr_pwrite64_32 = 181, nr_clock_nanosleep_time64 = 407, nr_fstatfs64 = 269,
+    nr_set_thread_area = 243,
+};
+
 #else
-#error "openkal-linux supports x86_64 and aarch64"
+#error "openkal-linux supports x86_64, aarch64 and i386"
 #endif
 
 // --- error values, as the kernel returns them ------------------------------
@@ -333,7 +431,7 @@ enum : okl_long {
     // "End this context when the one that started it ends", which is what
     // binding a started program's lifetime is expressed as here.
     pr_set_pdeathsig = 1,
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__i386__)
     o_directory = 0200000, o_nofollow = 0400000,
 #else
     o_directory = 040000,  o_nofollow = 0100000,
@@ -395,7 +493,9 @@ inline bool interrupted(okl_long r) { return r == -e_intr; }
 struct kflock {
     short    l_type;
     short    l_whence;
-    int      l_pad;
+#if !defined(__i386__)
+    int      l_pad;       // i386's `struct flock64' aligns the positions to four
+#endif
     okl_i64  l_start;
     okl_i64  l_len;
     int      l_pid;
@@ -421,7 +521,7 @@ struct kstatfs {
 // A property that varies between the RESOURCES of an interface is answered by
 // an enquiry taking the resource, and on this kernel the resource's format is
 // what the enquiry has to consult.
-enum : okl_long {
+enum : okl_ulong {
     fs_ext234    = 0xEF53,
     fs_btrfs     = 0x9123683E,
     fs_xfs       = 0x58465342,
@@ -440,10 +540,13 @@ enum : okl_long {
     fs_hfsplus   = 0x482B,
 };
 
+// On i386 this record is not the kernel's: its `stat64' carries thirty-two bit
+// times, and clause 5.5 of the specification asks for the sixty-four bit form,
+// so `fstat' and `fstatat' below fill it from `statx'. It has x86_64's order.
 struct kstat {
     okl_u64 dev;
     okl_u64 ino;
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__i386__)
     okl_u64 nlink;
     okl_u32 mode;
     okl_u32 uid;
@@ -498,7 +601,9 @@ struct kstat {
 
 // The kernel writes this record; a field read from the wrong offset is a wrong
 // answer and not a failure, so the offsets are stated here rather than trusted.
-#if defined(__x86_64__)
+#if defined(__i386__)
+// Not the kernel's record: nothing to state.
+#elif defined(__x86_64__)
 static_assert(__builtin_offsetof(kstat, mode)      == 24, "x86_64 struct stat");
 static_assert(__builtin_offsetof(kstat, size)      == 48, "x86_64 struct stat");
 static_assert(__builtin_offsetof(kstat, mtime_sec) == 88, "x86_64 struct stat");
@@ -508,13 +613,180 @@ static_assert(__builtin_offsetof(kstat, size)      == 48, "asm-generic struct st
 static_assert(__builtin_offsetof(kstat, mtime_sec) == 88, "asm-generic struct stat");
 #endif
 static_assert(__builtin_offsetof(kstat, ino) == 8, "the inode follows the device");
+#if !defined(__i386__)
 static_assert(sizeof(kstat) >= 128, "the kernel writes at least this much");
+#endif
 
 enum : okl_u32 {
     s_ifmt = 0170000, s_ifreg = 0100000, s_ifdir = 0040000, s_iflnk = 0120000,
 };
 
 struct ktimespec { okl_i64 sec; okl_i64 nsec; };
+
+// The kernel's `struct sigaction', as `rt_sigaction' takes it: the mask is the
+// kernel's sixty-four bit set on every architecture this implementation
+// supports --- two words on i386, where an `unsigned long' mask was half of it
+// and the size the call is told (`sizeof mask') was refused. One declaration for
+// every unit that installs a handler.
+// The kernel's signal set: sixty-four bits on every architecture this
+// implementation supports, two words on i386 --- where an `unsigned long' set
+// was half of it and the size a call is told was refused (measured:
+// `rt_sigprocmask(..., 4) = -EINVAL', and no program could be started).
+using ksigset = okl_u64;
+
+// THE KERNEL'S `siginfo_t' AS `waitid' WRITES IT: three ints (signal, error,
+// code), then the union, aligned to a pointer --- at sixteen on a sixty-four bit
+// word and twelve on i386, where reading at sixteen took the user for the
+// identifier and an exit status of 33 was reported as 0 (measured). For a child:
+// the identifier, the user, then the status.
+constexpr okl_uptr si_code_at   = 8;
+constexpr okl_uptr si_fields_at = sizeof(void*) == 8 ? 16 : 12;
+constexpr okl_uptr si_pid_at    = si_fields_at;
+constexpr okl_uptr si_status_at = si_fields_at + 8;
+struct k_sigaction { void* handler; okl_ulong flags; void* restorer; ksigset mask; };
+constexpr okl_ulong sa_restorer_flag = 0x04000000u;  // SA_RESTORER
+
+// The return from a handler this implementation installs, which a handler
+// installed without a C library must name on x86_64 and i386: one sequence
+// (observe.cpp), reached through this function so that no unit names another
+// unit's symbol outside this namespace (the independence check).
+void* signal_return();
+
+// --- the calls whose arguments are not the same on every architecture ----------
+//
+// EVERY CALLER USES THESE, ON EVERY ARCHITECTURE. On x86_64 and aarch64 each is
+// the call itself. On i386 a sixty-four bit position travels in two words
+// (`_llseek', `mmap2' in pages, `pread64', `ftruncate64'), the status of a node
+// comes from `statx' (the `stat64' record's times are thirty-two bits), and
+// `nanosleep' is `clock_nanosleep_time64'. A caller that named the common
+// number directly would compile on i386 and pass a truncated position: the
+// numbers above are -1 there, so such a call fails rather than misbehaves.
+#if defined(__i386__)
+struct kstatx_time { okl_i64 sec; okl_u32 nsec; okl_i32 pad; };
+struct kstatx {
+    okl_u32 mask, blksize;
+    okl_u64 attributes;
+    okl_u32 nlink, uid, gid;
+    unsigned short mode, pad0;
+    okl_u64 ino, size, blocks, attributes_mask;
+    kstatx_time atime, btime, ctime, mtime;
+    okl_u32 rdev_major, rdev_minor, dev_major, dev_minor;
+    okl_u64 spare[14];
+};
+static_assert(__builtin_offsetof(kstatx, mode) == 28 && __builtin_offsetof(kstatx, mtime) == 112 &&
+              __builtin_offsetof(kstatx, dev_major) == 136 && sizeof(kstatx) == 256, "struct statx");
+inline okl_u64 encode_dev(okl_u32 major, okl_u32 minor) {
+    return (okl_u64{major & 0xfffff000u} << 32) | (okl_u64{major & 0xfffu} << 8) |
+           (okl_u64{minor & 0xffffff00u} << 12) | okl_u64{minor & 0xffu};
+}
+inline okl_long statx_into(okl_long dirfd, const char* path, okl_long flags, kstat* st) {
+    kstatx x{};
+    const okl_long r = sys(nr_statx, dirfd, reinterpret_cast<okl_long>(path), flags,
+                           0x7ff /* STATX_BASIC_STATS */, reinterpret_cast<okl_long>(&x));
+    if (r < 0) return r;
+    *st = kstat{};
+    st->dev = encode_dev(x.dev_major, x.dev_minor);
+    st->ino = x.ino;
+    st->nlink = x.nlink;
+    st->mode = x.mode;
+    st->uid = x.uid;
+    st->gid = x.gid;
+    st->rdev = encode_dev(x.rdev_major, x.rdev_minor);
+    st->size = static_cast<okl_i64>(x.size);
+    st->blksize = x.blksize;
+    st->blocks = static_cast<okl_i64>(x.blocks);
+    st->atime_sec = x.atime.sec; st->atime_nsec = x.atime.nsec;
+    st->mtime_sec = x.mtime.sec; st->mtime_nsec = x.mtime.nsec;
+    st->ctime_sec = x.ctime.sec; st->ctime_nsec = x.ctime.nsec;
+    return 0;
+}
+#endif
+
+// A file opened by a thirty-two bit program is limited to two gibibytes unless
+// it asks otherwise (EOVERFLOW); a sixty-four bit program is never limited.
+inline okl_long openat(okl_long dirfd, okl_long path, okl_long flags, okl_long mode = 0) {
+#if defined(__i386__)
+    flags |= 0100000;  // O_LARGEFILE
+#endif
+    return sys(nr_openat, dirfd, path, flags, mode);
+}
+
+inline okl_long fstat(okl_long fd, kstat* st) {
+#if defined(__i386__)
+    return statx_into(fd, "", 0x1000 /* AT_EMPTY_PATH */, st);
+#else
+    return sys(nr_fstat, fd, reinterpret_cast<okl_long>(st));
+#endif
+}
+inline okl_long fstatat(okl_long dirfd, const char* path, kstat* st, okl_long flags) {
+#if defined(__i386__)
+    return statx_into(dirfd, path, flags, st);
+#else
+    return sys(nr_newfstatat, dirfd, reinterpret_cast<okl_long>(path), reinterpret_cast<okl_long>(st), flags);
+#endif
+}
+inline okl_long mmap(okl_long addr, okl_long len, okl_long prot, okl_long flags, okl_long fd, okl_i64 off) {
+#if defined(__i386__)
+    if (off & 4095) return -22;  // EINVAL: mmap2 counts pages
+    return sys(nr_mmap2, addr, len, prot, flags, fd, static_cast<okl_long>(off >> 12));
+#else
+    return sys(nr_mmap, addr, len, prot, flags, fd, static_cast<okl_long>(off));
+#endif
+}
+inline okl_i64 lseek(okl_long fd, okl_i64 off, okl_long whence) {
+#if defined(__i386__)
+    okl_i64 at = 0;
+    const okl_long r = sys(nr_llseek, fd, static_cast<okl_long>(static_cast<okl_u64>(off) >> 32),
+                           static_cast<okl_long>(static_cast<okl_u64>(off) & 0xffffffffu),
+                           reinterpret_cast<okl_long>(&at), whence);
+    return r < 0 ? okl_i64{r} : at;
+#else
+    return sys(nr_lseek, fd, static_cast<okl_long>(off), whence);
+#endif
+}
+inline okl_long pread(okl_long fd, void* buf, okl_uptr n, okl_i64 off) {
+#if defined(__i386__)
+    return sys(nr_pread64_32, fd, reinterpret_cast<okl_long>(buf), static_cast<okl_long>(n),
+               static_cast<okl_long>(static_cast<okl_u64>(off) & 0xffffffffu),
+               static_cast<okl_long>(static_cast<okl_u64>(off) >> 32));
+#else
+    return sys(nr_pread64, fd, reinterpret_cast<okl_long>(buf), static_cast<okl_long>(n), static_cast<okl_long>(off));
+#endif
+}
+inline okl_long pwrite(okl_long fd, const void* buf, okl_uptr n, okl_i64 off) {
+#if defined(__i386__)
+    return sys(nr_pwrite64_32, fd, reinterpret_cast<okl_long>(buf), static_cast<okl_long>(n),
+               static_cast<okl_long>(static_cast<okl_u64>(off) & 0xffffffffu),
+               static_cast<okl_long>(static_cast<okl_u64>(off) >> 32));
+#else
+    return sys(nr_pwrite64, fd, reinterpret_cast<okl_long>(buf), static_cast<okl_long>(n), static_cast<okl_long>(off));
+#endif
+}
+inline okl_long ftruncate(okl_long fd, okl_i64 size) {
+#if defined(__i386__)
+    return sys(nr_ftruncate64, fd, static_cast<okl_long>(static_cast<okl_u64>(size) & 0xffffffffu),
+               static_cast<okl_long>(static_cast<okl_u64>(size) >> 32));
+#else
+    return sys(nr_ftruncate, fd, static_cast<okl_long>(size));
+#endif
+}
+inline okl_long fstatfs(okl_long fd, kstatfs* sf) {
+#if defined(__i386__)
+    // `statfs64': this record, with its size stated, since the thirty-two bit
+    // `statfs' cannot report a volume's blocks past four gibibytes.
+    return sys(nr_fstatfs64, fd, static_cast<okl_long>(sizeof(kstatfs)), reinterpret_cast<okl_long>(sf));
+#else
+    return sys(nr_fstatfs, fd, reinterpret_cast<okl_long>(sf));
+#endif
+}
+inline okl_long nanosleep(const ktimespec* req, ktimespec* rem) {
+#if defined(__i386__)
+    return sys(nr_clock_nanosleep_time64, 1 /* CLOCK_MONOTONIC */, 0, reinterpret_cast<okl_long>(req),
+               reinterpret_cast<okl_long>(rem));
+#else
+    return sys(nr_nanosleep, reinterpret_cast<okl_long>(req), reinterpret_cast<okl_long>(rem));
+#endif
+}
 
 struct kdirent64 {
     okl_u64 ino;

@@ -33,7 +33,7 @@ bool strict() {
     int v = __atomic_load_n(&g_strict, __ATOMIC_ACQUIRE);
     if (v >= 0) return v == 1;
     v = 0;
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd,
+    const okl_long fd = okl::openat( okl::at_fdcwd,
                                  reinterpret_cast<okl_long>("/proc/sys/vm/overcommit_memory"),
                                  okl::o_rdonly | okl::o_cloexec, 0);
     if (!okl::failed(fd)) {
@@ -50,7 +50,7 @@ okl_uptr granularity() { return static_cast<okl_uptr>(kal_memory_granularity());
 bool multiple(okl_uptr v, okl_uptr g) { return (v & (g - 1)) == 0; }
 
 okl_long map_at(void* at, okl_uptr len, int prot, int extra) {
-    return okl::sys(okl::nr_mmap, reinterpret_cast<okl_long>(at), static_cast<okl_long>(len), prot,
+    return okl::mmap( reinterpret_cast<okl_long>(at), static_cast<okl_long>(len), prot,
                     okl::map_private | okl::map_anonymous | extra, -1, 0);
 }
 

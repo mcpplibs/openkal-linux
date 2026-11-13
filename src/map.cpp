@@ -27,15 +27,15 @@ int kal_map_file(kal_file f, kal_u64 offset, kal_uintptr length, kal_uintptr how
         || (how & ~(KAL_MAP_WRITE | KAL_MAP_SHARED)) != 0)
         return kal_err_invalid;
     okl::kstat st{};
-    const okl_long s = okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&st));
+    const okl_long s = okl::fstat(fd, &st);
     if (okl::failed(s)) return okl::translate(s);
     if ((st.mode & okl::s_ifmt) != okl::s_ifreg) return kal_err_not_supported;
     const kal_u64 size = st.size > 0 ? static_cast<kal_u64>(st.size) : 0;
     if (offset > size || static_cast<kal_u64>(length) > size - offset) return kal_err_invalid;
     const okl_long prot  = okl::prot_read | ((how & KAL_MAP_WRITE) ? okl::prot_write : 0);
     const okl_long flags = (how & KAL_MAP_SHARED) ? okl::map_shared : okl::map_private;
-    const okl_long r = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(length), prot, flags, fd,
-                                static_cast<okl_long>(offset));
+    const okl_long r = okl::mmap( 0, static_cast<okl_long>(length), prot, flags, fd,
+                                static_cast<okl_i64>(offset));
     if (okl::failed(r)) {
         // ENODEV: the file system does not map. The resource, not the
         // implementation, refuses (map.h).
