@@ -212,7 +212,7 @@ bool list(root& r, const char* dir, okl_uptr dlen, okl_u64 key) {
     if (dlen + 1 >= sizeof path) return false;
     if (dlen == 0) { path[0] = '.'; path[1] = '\0'; }
     else { okl::copy(path, dir, dlen); path[dlen] = '\0'; }
-    const okl_long fd = okl::sys(okl::nr_openat, r.base, reinterpret_cast<okl_long>(path),
+    const okl_long fd = okl::openat( r.base, reinterpret_cast<okl_long>(path),
                                  okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
     if (okl::failed(fd)) return false;
     alignas(8) char buf[16384];
@@ -264,7 +264,7 @@ int attenuate(int fd, okl_u32 add, int record, int* out) {
         do { digits[n++] = static_cast<char>('0' + v % 10); v /= 10; } while (v);
         while (n) proc[o++] = digits[--n];
         proc[o] = '\0';
-        okl_long r = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(proc),
+        okl_long r = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>(proc),
                               okl::o_wronly | okl::o_append | okl::o_cloexec, 0);
         if (okl::failed(r)) r = okl::sys(okl::nr_fcntl, record, okl::f_dupfd_cloexec, 3);
         if (okl::failed(r)) { okl::sys(okl::nr_close, nfd); return okl::translate(r); }

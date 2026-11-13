@@ -468,6 +468,16 @@ jobs:
           rm -f "$RUNNER_TEMP/android.bad"
           echo "both Android ABIs build from this implementation unchanged, and name no C library symbol"
 
+      # A THIRTY-TWO BIT BUILD RUNS (openkal 0.25.1, clause 5.5). The same
+      # sources, standalone, for i386: built with the toolchain's clang and lld
+      # and RUN here, since an x86_64 kernel executes a static i386 program. A
+      # file past four gibibytes, a task with its own thread-local storage and a
+      # sleep through the sixty-four bit clock; the conformance suite runs for
+      # i686 where the family's C library and C++ runtime are built for it.
+      - name: An i386 build of this implementation runs
+        if: matrix.toolchain == 'llvm@22.1.8'
+        run: OPENKAL_INCLUDE="$PWD/.spec/include" bash tools/word32-check.sh
+
       # A checker is only useful if it fails when it should.
       - name: The independence check detects a dependence
         run: |

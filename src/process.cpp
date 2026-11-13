@@ -93,7 +93,7 @@ void close_on_exec_from(okl_long from) {
                                 okl::close_range_cloexec);
     if (!okl::failed(r)) return;
 
-    const okl_long dir = okl::sys(okl::nr_openat, okl::at_fdcwd,
+    const okl_long dir = okl::openat( okl::at_fdcwd,
                                   reinterpret_cast<okl_long>("/proc/self/fd"),
                                   okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
     if (!okl::failed(dir)) {
@@ -408,8 +408,37 @@ extern "C" {
 // first one ended (openkal `kal_process_open_id').
 namespace {
 constexpr unsigned kind_child = 0, kind_self = 1, kind_opened = 2, kind_observed = 3;
+okl_long opened_pid(okl_long fd);  // below: the number a program's descriptor stands for
+#if defined(__i386__)
+// A THIRTY-TWO BIT WORD (clause 5.5): the kind in the top two bits, a number
+// (pid_max is at most 2^22) in the low twenty-two; an observed program keeps the
+// low eight bits of its start between them, so a number reused within 256
+// ticks of a start is not told apart; an opened one carries its descriptor
+// only, and its number is read from the descriptor's /proc/self/fdinfo entry.
+inline unsigned handle_kind(kal_process h) { return static_cast<unsigned>(h.h >> 30); }
+inline okl_long opened_fd(kal_process h) { return static_cast<okl_long>(h.h & 0xffffu) - 1; }
+inline okl_long handle_pid(kal_process h) {
+    return handle_kind(h) == kind_opened ? opened_pid(opened_fd(h)) : static_cast<okl_long>(h.h & 0x3fffffu);
+}
+inline bool same_start(kal_process h, okl_u64 ticks) { return (ticks & 0xffu) == ((h.h >> 22) & 0xffu); }
+inline kal_uintptr make_handle(unsigned kind, okl_long pid, okl_u64 extra) {
+    const kal_uintptr k = static_cast<kal_uintptr>(kind) << 30;
+    if (kind == kind_opened) return k | static_cast<kal_uintptr>(extra & 0xffffu);
+    return k | (static_cast<kal_uintptr>(extra & 0xffu) << 22) | static_cast<kal_uintptr>(pid & 0x3fffff);
+}
+#else
+// The kind in the top byte, which no identifier reaches; the number in the low
+// thirty-two bits; between them an opened program's descriptor (plus one) or
+// an observed program's start (low twenty-four bits).
 inline unsigned handle_kind(kal_process h) { return static_cast<unsigned>(h.h >> 56); }
+inline okl_long opened_fd(kal_process h) { return static_cast<okl_long>((h.h >> 32) & 0xffffu) - 1; }
 inline okl_long handle_pid(kal_process h) { return static_cast<okl_long>(h.h & 0xffffffffu); }
+inline bool same_start(kal_process h, okl_u64 ticks) { return (ticks & 0xffffffu) == ((h.h >> 32) & 0xffffffu); }
+inline kal_uintptr make_handle(unsigned kind, okl_long pid, okl_u64 extra) {
+    return (static_cast<kal_uintptr>(kind) << 56) | (static_cast<kal_uintptr>(extra & 0xffffffu) << 32)
+           | static_cast<kal_uintptr>(pid);
+}
+#endif
 }  // namespace
 
 // --- where `execveat' cannot be used (0.18) ----------------------------------
@@ -438,7 +467,7 @@ int g_by_name = -1;   // -1 not yet decided, 0 execveat, 1 execve
 // hides it, a PROOT_ variable. A debugger also traces and is not a translator.
 bool under_translator() {
     char st[4096];
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd,
+    const okl_long fd = okl::openat( okl::at_fdcwd,
                                  reinterpret_cast<okl_long>("/proc/self/status"),
                                  okl::o_rdonly | okl::o_cloexec, 0);
     okl_long n = 0;
@@ -458,7 +487,7 @@ bool under_translator() {
         char path[48] = "/proc/";
         char* o = put_decimal(path + 6, static_cast<okl_uptr>(pid));
         okl::copy(o, "/comm", 6);
-        const okl_long cfd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+        const okl_long cfd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>(path),
                                       okl::o_rdonly | okl::o_cloexec, 0);
         if (!okl::failed(cfd)) {
             char comm[32] = {};
@@ -500,9 +529,8 @@ bool absolute_under(int fd, const char* name, okl_uptr len, char* out, okl_uptr 
 // Whether `name' reaches the file `fd' holds: the same device and inode.
 bool same_file(okl_long fd, const char* name) {
     okl::kstat held{}, named{};
-    if (okl::failed(okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&held)))) return false;
-    if (okl::failed(okl::sys(okl::nr_newfstatat, okl::at_fdcwd, reinterpret_cast<okl_long>(name),
-                             reinterpret_cast<okl_long>(&named), 0)))
+    if (okl::failed(okl::fstat(fd, &held))) return false;
+    if (okl::failed(okl::fstatat(okl::at_fdcwd, name, &named, 0)))
         return false;
     return held.dev == named.dev && held.ino == named.ino;
 }
@@ -582,7 +610,7 @@ okl_long confine_to(const okl_u32* rights, kal_uintptr g, int base, const char* 
         if (okl::failed(r)) why = r;
     }
     auto by_name = [&](okl_long at, const char* name, okl_u64 allowed) {
-        const okl_long fd = okl::sys(okl::nr_openat, at, reinterpret_cast<okl_long>(name),
+        const okl_long fd = okl::openat( at, reinterpret_cast<okl_long>(name),
                                      okl::o_path | okl::o_cloexec, 0);
         if (okl::failed(fd)) return;   // absent: nothing to allow
         add(allowed, fd);
@@ -642,7 +670,7 @@ int start_image(void* arg) {
     // replacement keeps it.
     for (int signo = 1; signo <= 64; ++signo) {
         if (signo == 9 || signo == 19) continue;   // SIGKILL, SIGSTOP
-        struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act{};
+        okl::k_sigaction act{};
         if (okl::failed(okl::sys(okl::nr_rt_sigaction, signo, 0, reinterpret_cast<okl_long>(&act),
                                  sizeof act.mask)))
             continue;
@@ -683,7 +711,7 @@ int start_image(void* arg) {
     const kal_uintptr nulls = how->flags & (KAL_SPAWN_NULL_IN | KAL_SPAWN_NULL_OUT | KAL_SPAWN_NULL_ERR);
     okl_long device = 0;
     if (nulls != 0) {
-        const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>("/dev/null"),
+        const okl_long fd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>("/dev/null"),
                                      okl::o_rdwr | okl::o_cloexec, 0);
         if (okl::failed(fd)) {
             report.say(fd);
@@ -746,8 +774,7 @@ int start_image(void* arg) {
     // SIGPIPE AS THIS PROGRAM WAS STARTED WITH, not as this implementation
     // set it for its own writes (env.cpp): an ignore would outlive `execve'.
     if (!okl::g_pipe_started_ignored) {
-        struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; }
-            standard{ nullptr /* SIG_DFL */, 0, nullptr, 0 };
+        okl::k_sigaction standard{ nullptr /* SIG_DFL */, 0, nullptr, 0 };
         okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
                  reinterpret_cast<okl_long>(&standard), 0, sizeof standard.mask);
     }
@@ -856,7 +883,7 @@ int start_image(void* arg) {
         okl::sys(okl::nr_exit_group, 127);
         for (;;) { }
     }
-    okl_long exe = okl::sys(okl::nr_openat, base, reinterpret_cast<okl_long>(p.buf),
+    okl_long exe = okl::openat( base, reinterpret_cast<okl_long>(p.buf),
                             okl::o_path | okl::o_cloexec, 0);
     if (okl::failed(exe)) {
         report.say(exe);
@@ -1037,7 +1064,7 @@ int kal_process_spawn(const kal_spawn* how,
     const start_plan plan{ how, &p, granted, b, w, in, ou, er, &args, &envs, &report, resolved,
                            named, use_name, unit, bind, join, mine, &caller_mask,
                            &carry, confine, grant_rights };
-    const okl_long stack = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(kStartStack),
+    const okl_long stack = okl::mmap( 0, static_cast<okl_long>(kStartStack),
                                     okl::prot_read | okl::prot_write,
                                     okl::map_private | okl::map_anonymous, -1, 0);
     const okl_long child = okl::failed(stack)
@@ -1118,7 +1145,7 @@ int kal_process_wait(kal_process h, int* status, int* terminated_by_environment)
     // peak memory, which the record keeps --- can still be asked about. A
     // program ended by its unit's limit is told apart by the unit (openkal 0.20).
     bool ended = false;
-    return okl::child_outcome(static_cast<okl_long>(h.h & 0xffffffffu), true, status,
+    return okl::child_outcome(handle_pid(h), true, status,
                               terminated_by_environment, ended);
 }
 
@@ -1207,7 +1234,7 @@ void kal_process_close(kal_process h) {
         return;
     }
     if (handle_kind(h) == kind_opened) {
-        const okl_long fd = static_cast<okl_long>((h.h >> 32) & 0xffffu) - 1;
+        const okl_long fd = opened_fd(h);
         if (fd >= 0) okl::sys(okl::nr_close, fd);
     }
 }
@@ -1237,20 +1264,11 @@ namespace {
 kal_u32 g_stop_word = 0;
 int     g_stop_armed = 0;
 
-#if defined(__x86_64__)
-extern "C" void okl_sigreturn_trampoline(void);
-// IN `.text', SAID IN SO MANY WORDS (0.18). A top-level `asm' is emitted into
-// whatever section the compiler is in at that point of the file, and GCC at
-// -O0 was in `.bss': the three instructions were zero bytes in memory that may
-// not be executed, and the first request to end a program faulted on its way
-// back from the handler (measured: SIGSEGV after SIGTERM, GCC -O0 only).
-asm(".pushsection .text,\"ax\",@progbits\n"
-    ".globl okl_sigreturn_trampoline\n"
-    "okl_sigreturn_trampoline:\n"
-    "  movq $15, %rax\n"      // rt_sigreturn
-    "  syscall\n"
-    ".popsection\n");
-constexpr unsigned long sa_restorer_flag = 0x04000000u;   // SA_RESTORER
+// The return from a handler is the one observe.cpp defines (okl_signal_return),
+// named on the architectures whose kernel requires it of a handler installed
+// without a C library.
+#if defined(__x86_64__) || defined(__i386__)
+constexpr unsigned long sa_restorer_flag = okl::sa_restorer_flag;
 #endif
 
 // Which request arrived first, for `kal_process_end_as_requested'.
@@ -1287,7 +1305,7 @@ void stop_handler(int signo) {
 // code written for the other kernel, where the trampoline made the failure
 // mode obvious.
 bool arm_one(int signo) {
-    struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act {};
+    okl::k_sigaction act {};
     // A REQUEST THE STARTER ARRANGED NOT TO DELIVER STAYS UNDELIVERED (0.17,
     // the take-over rule). A program started in the background is started with
     // these requests ignored, and taking them over would end it when its
@@ -1299,9 +1317,9 @@ bool arm_one(int signo) {
         if (!okl::failed(r) && old.handler == reinterpret_cast<void*>(1) /* SIG_IGN */) return true;
     }
     act.handler = reinterpret_cast<void*>(&stop_handler);
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__i386__)
     act.flags   = sa_restorer_flag;
-    act.restorer = reinterpret_cast<void*>(&okl_sigreturn_trampoline);
+    act.restorer = reinterpret_cast<void*>(&okl_signal_return);
 #endif
     return !okl::failed(okl::sys(okl::nr_rt_sigaction, signo,
                                  reinterpret_cast<okl_long>(&act), 0, sizeof act.mask));
@@ -1355,12 +1373,35 @@ okl_long read_stat(okl_long pid, char (&b)[1024]) {
     if (pid == 0) { okl::copy(o, "self", 4); o += 4; }
     else o = put_decimal(o, static_cast<okl_uptr>(pid));
     okl::copy(o, "/stat", 6);
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+    const okl_long fd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>(path),
                                  okl::o_rdonly | okl::o_cloexec, 0);
     if (okl::failed(fd)) return 0;
     const okl_long n = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(b), sizeof b - 1);
     okl::sys(okl::nr_close, fd);
     return n > 0 ? n : 0;
+}
+
+// The number a program's descriptor stands for (`Pid:' in the descriptor's
+// /proc/self/fdinfo entry), or 0. Only i386 asks: its handle has no room for
+// both (see handle_kind).
+okl_long opened_pid(okl_long fd) {
+    if (fd < 0) return 0;
+    char path[48] = "/proc/self/fdinfo/";
+    okl::copy(put_decimal(path + 18, static_cast<okl_uptr>(fd)), "", 1);
+    const okl_long f = okl::openat(okl::at_fdcwd, reinterpret_cast<okl_long>(path), okl::o_rdonly | okl::o_cloexec);
+    if (okl::failed(f)) return 0;
+    char b[512];
+    const okl_long n = okl::sys(okl::nr_read, f, reinterpret_cast<okl_long>(b), sizeof b - 1);
+    okl::sys(okl::nr_close, f);
+    for (okl_long i = 0; i + 4 < n; ++i) {
+        if (b[i] != 'P' || b[i + 1] != 'i' || b[i + 2] != 'd' || b[i + 3] != ':' || (i > 0 && b[i - 1] != '\n'))
+            continue;
+        okl_long v = 0, j = i + 4;
+        while (j < n && (b[j] == ' ' || b[j] == '\t')) ++j;
+        while (j < n && b[j] >= '0' && b[j] <= '9') v = v * 10 + (b[j++] - '0');
+        return v;
+    }
+    return 0;
 }
 
 // The fields after the name, which is in parentheses and may itself contain
@@ -1457,13 +1498,13 @@ bool has_ended(kal_process h) {
         const char state = stat_state(handle_pid(h));
         okl_u64 t = 0;
         return state == 0 || state == 'Z' || state == 'X' || !started_ticks(handle_pid(h), t)
-            || (t & 0xffffffu) != ((h.h >> 32) & 0xffffffu);
+            || !same_start(h, t);
     }
     if (handle_kind(h) == kind_opened) {
-        const okl_long fd = static_cast<okl_long>((h.h >> 32) & 0xffffu) - 1;
+        const okl_long fd = opened_fd(h);
         if (fd < 0) return false;
         struct { int fd; short events, revents; } pfd{ static_cast<int>(fd), 1 /* POLLIN */, 0 };
-        struct { okl_long sec, nsec; } zero{0, 0};
+        okl::ktimespec zero{0, 0};
         const okl_long r = okl::sys(okl::nr_ppoll, reinterpret_cast<okl_long>(&pfd), 1,
                                     reinterpret_cast<okl_long>(&zero), 0, 0);
         return r > 0 && (pfd.revents & 1) != 0;
@@ -1483,8 +1524,7 @@ bool has_ended(kal_process h) {
 
 int kal_process_self(kal_process* out) {
     if (out == nullptr) return kal_err_invalid;
-    *out = kal_process{ (static_cast<kal_uintptr>(kind_self) << 56)
-                        | static_cast<kal_uintptr>(okl::sys(okl::nr_getpid)) };
+    *out = kal_process{ make_handle(kind_self, okl::sys(okl::nr_getpid), 0) };
     return kal_ok;
 }
 
@@ -1501,8 +1541,7 @@ int kal_process_open_id(kal_u64 id, kal_process* out) {
         okl_u64 t = 0;
         if (state == 0 || state == 'Z' || state == 'X' || !started_ticks(static_cast<okl_long>(id), t))
             return kal_err_not_found;
-        *out = kal_process{ (static_cast<kal_uintptr>(kind_observed) << 56)
-                            | (static_cast<kal_uintptr>(t & 0xffffffu) << 32) | static_cast<kal_uintptr>(id) };
+        *out = kal_process{ make_handle(kind_observed, static_cast<okl_long>(id), t) };
         return kal_ok;
     };
     if (!open_id_available()) {
@@ -1514,9 +1553,7 @@ int kal_process_open_id(kal_u64 id, kal_process* out) {
     if (okl::failed(fd)) return okl::translate(fd);
     if (fd >= 0xffff) { okl::sys(okl::nr_close, fd); return kal_err_no_memory; }
     okl::sys(okl::nr_fcntl, fd, okl::f_setfd, okl::fd_cloexec);
-    *out = kal_process{ (static_cast<kal_uintptr>(kind_opened) << 56)
-                        | (static_cast<kal_uintptr>(fd + 1) << 32)
-                        | static_cast<kal_uintptr>(id) };
+    *out = kal_process{ make_handle(kind_opened, static_cast<okl_long>(id), static_cast<okl_u64>(fd + 1)) };
     return kal_ok;
 }
 
@@ -1599,18 +1636,18 @@ int kal_process_end_as_requested(void) {
     if (__atomic_load_n(&g_stop_word, __ATOMIC_ACQUIRE) == 0) return kal_err_invalid;
     int signo = __atomic_load_n(&g_stop_signal, __ATOMIC_RELAXED);
     if (signo == 0) signo = 15;
-    struct { void* handler; unsigned long flags; void* restorer; unsigned long mask; } act {};
-#if defined(__x86_64__)
+    okl::k_sigaction act {};
+#if defined(__x86_64__) || defined(__i386__)
     act.flags    = sa_restorer_flag;
-    act.restorer = reinterpret_cast<void*>(&okl_sigreturn_trampoline);
+    act.restorer = reinterpret_cast<void*>(&okl_signal_return);
 #endif
     okl::sys(okl::nr_rt_sigaction, signo, reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
     unsigned long set = 1ul << (signo - 1);
     okl::sys(okl::nr_rt_sigprocmask, 1 /* SIG_UNBLOCK */, reinterpret_cast<okl_long>(&set), 0, sizeof set);
     okl::sys(okl::nr_kill, okl::sys(okl::nr_getpid), signo);
     for (int i = 0; i < 100; ++i) {
-        struct { okl_long sec, nsec; } ts{0, 1000000};
-        okl::sys(okl::nr_nanosleep, reinterpret_cast<okl_long>(&ts), 0);
+        okl::ktimespec ts{0, 1000000};
+        okl::nanosleep(&ts, nullptr);
     }
     okl::sys(okl::nr_exit_group, 128 + signo);
     for (;;) { }
@@ -1670,7 +1707,7 @@ kal_uintptr kal_process_props(void) {
 namespace {
 
 okl_long read_small(const char* path, char* b, okl_long cap) {
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+    const okl_long fd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>(path),
                                  okl::o_rdonly | okl::o_cloexec, 0);
     if (okl::failed(fd)) return -1;
     okl_long n = 0;
@@ -1762,7 +1799,7 @@ limited* row_of(okl_long unit) {
 kal_u32 members_of(okl_long unit, okl_u64& memory) {
     memory = 0;
     kal_u32 count = 0;
-    const okl_long dir = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>("/proc"),
+    const okl_long dir = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>("/proc"),
                                   okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
     if (okl::failed(dir)) return 0;
     alignas(8) char buf[8192];
@@ -1840,7 +1877,7 @@ void supervise(void*) {
         }
         const okl_i64 ms = worst < 500 ? 500 : worst < 800 ? 200 : 100;
         okl::ktimespec ts{ 0, ms * 1000000 };
-        okl::sys(okl::nr_nanosleep, reinterpret_cast<okl_long>(&ts), 0);
+        okl::nanosleep(&ts, nullptr);
     }
 }
 
@@ -1975,7 +2012,7 @@ struct unit_identity {
 bool unit_birth(okl_long pid, kal_u64& value) { okl_u64 ticks = 0; if (!started_ticks(pid,ticks)) return false; value = ticks; return true; }
 bool unit_origin(char* boot, char* space) {
     if (self_number() != okl::sys(okl::nr_getpid)) return false;
-    const auto fd = okl::sys(okl::nr_openat, okl::at_fdcwd,
+    const auto fd = okl::openat( okl::at_fdcwd,
         reinterpret_cast<okl_long>("/proc/sys/kernel/random/boot_id"), okl::o_rdonly | okl::o_cloexec, 0);
     if (okl::failed(fd)) return false;
     auto n = okl::sys(okl::nr_read, fd, reinterpret_cast<okl_long>(boot), 63);

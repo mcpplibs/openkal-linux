@@ -129,8 +129,7 @@ bool granted(preopen* t, kal_uintptr* n) {
         for (okl_uptr i = 0; i < len; ++i) if (v[i] == '\0') return false;
 
         okl::kstat st{};
-        const bool dir = !okl::failed(okl::sys(okl::nr_fstat, static_cast<okl_long>(fd),
-                                               reinterpret_cast<okl_long>(&st)))
+        const bool dir = !okl::failed(okl::fstat(static_cast<okl_long>(fd), &st))
                       && (st.mode & okl::s_ifmt) == okl::s_ifdir;
         if (dir) okl::sys(okl::nr_fcntl, static_cast<okl_long>(fd), okl::f_setfd, okl::fd_cloexec);
         t[k++] = { v, len, dir ? okl::pack(static_cast<int>(fd)) : 0u };
@@ -180,9 +179,9 @@ preopen* table(kal_uintptr* count) {
         if (!okl::failed(n) && n > 1) cwd_len = static_cast<okl_uptr>(n) - 1;
         else { g_cwd[0] = '.'; g_cwd[1] = '\0'; cwd_len = 1; }
 
-        const okl_long fd0 = okl::sys(okl::nr_openat, okl::at_fdcwd,
+        const okl_long fd0 = okl::openat( okl::at_fdcwd,
                                       reinterpret_cast<okl_long>("."), dir_handle_flags, 0);
-        const okl_long fd1 = okl::sys(okl::nr_openat, okl::at_fdcwd,
+        const okl_long fd1 = okl::openat( okl::at_fdcwd,
                                       reinterpret_cast<okl_long>("/"), dir_handle_flags, 0);
         t[0] = { g_cwd, cwd_len, okl::failed(fd0) ? 0u : okl::pack(static_cast<int>(fd0)) };
         t[1] = { "/",   1,       okl::failed(fd1) ? 0u : okl::pack(static_cast<int>(fd1)) };
@@ -222,10 +221,10 @@ kal_uintptr volume_props(int fd) {
     if (fd < 0) return 0;
 
     okl::kstatfs sf{};
-    const okl_long r = okl::sys(okl::nr_fstatfs, fd, reinterpret_cast<okl_long>(&sf));
+    const okl_long r = okl::fstatfs(fd, &sf);
     if (okl::failed(r)) return conservative;
 
-    switch (sf.f_type) {
+    switch (static_cast<okl_ulong>(sf.f_type)) {
         // Formats with a case-sensitive namespace and nodes that name others.
         //
         // A rename that does not replace (0.17) is `renameat2' with
@@ -293,7 +292,7 @@ kal_uintptr volume_props_of(int fd) { return volume_props(fd); }
 // asked about, so a reader takes the sequence before and after reading them and
 // reads again if a writer was between; writers take the lock. The lock taken on
 // every enquiry was a fifth of what an enquiry cost beyond the kernel's own.
-struct volume_answer { okl_u64 dev; kal_uintptr props; bool known; };
+struct volume_answer { alignas(8) okl_u64 dev; kal_uintptr props; bool known; };  // aligned: an atomic word on i386 too
 volume_answer g_volumes[8];
 unsigned g_volume_next = 0;
 volatile int g_volume_lock = 0;
@@ -534,7 +533,7 @@ int kal_fs_open_dir(kal_dir base, const char* name, kal_uintptr len, kal_dir* ou
         asked(b, false, name, len);
         return kal_err_not_found;
     }
-    const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf),
+    const okl_long fd = okl::openat( b, reinterpret_cast<okl_long>(t.buf),
                                  dir_handle_flags, 0);
     if (okl::failed(fd)) {
         if (rights && (fd == -okl::e_noent || fd == -okl::e_notdir)) asked(b, false, name, len);
@@ -574,7 +573,7 @@ int kal_fs_open(kal_dir base, const char* name, kal_uintptr len,
         asked(b, false, name, len);
         return kal_err_not_found;
     }
-    const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf), f, 0666);
+    const okl_long fd = okl::openat( b, reinterpret_cast<okl_long>(t.buf), f, 0666);
     if (okl::failed(fd)) {
         if (rights && (fd == -okl::e_noent || fd == -okl::e_notdir)) asked(b, false, name, len);
         return okl::translate(fd);
@@ -616,8 +615,8 @@ int kal_fs_seek(kal_file f, kal_i64 offset, int whence, kal_u64* result) {
     int w = 0;
     if (whence == KAL_SEEK_CURRENT) w = 1;
     else if (whence == KAL_SEEK_END) w = 2;
-    const okl_long r = okl::sys(okl::nr_lseek, fd, static_cast<okl_long>(offset), w);
-    if (okl::failed(r)) return okl::translate(r);
+    const okl_i64 r = okl::lseek(fd, static_cast<okl_i64>(offset), w);
+    if (r < 0) return okl::translate(static_cast<okl_long>(r));
     if (result) *result = static_cast<kal_u64>(r);
     return kal_ok;
 }
@@ -625,7 +624,7 @@ int kal_fs_seek(kal_file f, kal_i64 offset, int whence, kal_u64* result) {
 int kal_fs_truncate(kal_file f, kal_u64 size) {
     const int fd = okl::unpack(f.h);
     if (fd < 0) return kal_err_invalid;
-    const okl_long r = okl::sys(okl::nr_ftruncate, fd, static_cast<okl_long>(size));
+    const okl_long r = okl::ftruncate(fd, static_cast<okl_i64>(size));
     return okl::failed(r) ? okl::translate(r) : kal_ok;
 }
 
@@ -638,8 +637,7 @@ kal_intptr kal_fs_read_at(kal_file f, void* buf, kal_uintptr len, kal_u64 offset
     const int fd = okl::unpack(f.h);
     if (fd < 0) return -kal_err_invalid;
     for (;;) {
-        const okl_long r = okl::sys(okl::nr_pread64, fd, reinterpret_cast<okl_long>(buf),
-                                    static_cast<okl_long>(len), static_cast<okl_long>(offset));
+        const okl_long r = okl::pread(fd, buf, static_cast<okl_uptr>(len), static_cast<okl_i64>(offset));
         if (okl::interrupted(r)) continue;
         if (okl::failed(r)) return -okl::translate(r);
         return static_cast<kal_intptr>(r);
@@ -652,9 +650,7 @@ kal_intptr kal_fs_write_at(kal_file f, const void* buf, kal_uintptr len, kal_u64
     const auto* p = static_cast<const unsigned char*>(buf);
     kal_uintptr done = 0;
     while (done < len) {
-        const okl_long r = okl::sys(okl::nr_pwrite64, fd, reinterpret_cast<okl_long>(p + done),
-                                    static_cast<okl_long>(len - done),
-                                    static_cast<okl_long>(offset + done));
+        const okl_long r = okl::pwrite(fd, p + done, static_cast<okl_uptr>(len - done), static_cast<okl_i64>(offset + done));
         if (okl::interrupted(r)) continue;
         if (okl::failed(r)) {
             if (done != 0) return static_cast<kal_intptr>(done);
@@ -686,8 +682,7 @@ int kal_fs_info(kal_dir base, const char* name, kal_uintptr len,
     // A C library above reported a link where the host reports a regular file,
     // and one symbolic link made a whole tree uncopyable.
     const okl_long at = (flags & KAL_FS_NO_RESOLVE) ? okl::at_symlink_nofollow : 0;
-    const okl_long r = okl::sys(okl::nr_newfstatat, b, reinterpret_cast<okl_long>(t.buf),
-                                reinterpret_cast<okl_long>(&st), at);
+    const okl_long r = okl::fstatat(b, t.buf, &st, at);
     if (okl::failed(r)) {
         // Clause 7.7: enquiry about a name that does not exist is answered,
         // not refused. A component of the name that is not a directory is the
@@ -709,7 +704,7 @@ int kal_fs_file_info(kal_file f, kal_u32 wanted, kal_node_info* out) {
     const int fd = okl::unpack(f.h);
     if (fd < 0 || !info_ok(out)) return kal_err_invalid;
     okl::kstat st{};
-    const okl_long r = okl::sys(okl::nr_fstat, fd, reinterpret_cast<okl_long>(&st));
+    const okl_long r = okl::fstat(fd, &st);
     if (okl::failed(r)) return okl::translate(r);
     fill_info(st, wanted, out, fd);
     return kal_ok;
@@ -777,8 +772,7 @@ int kal_fs_set_executable_at(kal_dir base, const char* name, kal_uintptr len,
     if (refused_write(b)) return kal_err_permission;
 
     okl::kstat st{};
-    okl_long r = okl::sys(okl::nr_newfstatat, b, reinterpret_cast<okl_long>(t.buf),
-                          reinterpret_cast<okl_long>(&st), 0);
+    okl_long r = okl::fstatat(b, t.buf, &st, 0);
     if (okl::failed(r)) return okl::translate(r);
     const int k = kind_of(st.mode);
     if (k == kal_node_directory) return kal_err_is_directory;
@@ -872,7 +866,7 @@ int kal_fs_rename_flags(kal_dir from, const char* a, kal_uintptr alen,
 int kal_fs_list_begin(kal_dir d, kal_uintptr* iter) {
     const int fd = okl::unpack(d.h);
     if (fd < 0 || iter == nullptr) return kal_err_invalid;
-    const okl_long own = okl::sys(okl::nr_openat, fd, reinterpret_cast<okl_long>("."),
+    const okl_long own = okl::openat( fd, reinterpret_cast<okl_long>("."),
                                   okl::o_rdonly | okl::o_directory | okl::o_cloexec, 0);
     if (okl::failed(own)) return okl::translate(own);
     auto* s = static_cast<listing*>(kal_alloc(sizeof(listing), alignof(listing)));
@@ -1040,7 +1034,7 @@ int kal_fs_capacity(kal_dir d, kal_u64* total, kal_u64* available) {
     if (fd < 0) return kal_err_invalid;
 
     okl::kstatfs sf{};
-    const okl_long r = okl::sys(okl::nr_fstatfs, fd, reinterpret_cast<okl_long>(&sf));
+    const okl_long r = okl::fstatfs(fd, &sf);
     if (okl::failed(r)) return okl::translate(r);
 
     // In bytes, because that is what the interface says and what a caller of it
@@ -1090,8 +1084,7 @@ int kal_fs_hard_link(kal_dir from, const char* a, kal_uintptr alen,
     if (!ta.ok || !tb.ok) return kal_err_invalid;
     if (refused_write(t2)) return kal_err_permission;
     okl::kstat st{};
-    const okl_long s = okl::sys(okl::nr_newfstatat, f, reinterpret_cast<okl_long>(ta.buf),
-                                reinterpret_cast<okl_long>(&st), okl::at_symlink_nofollow);
+    const okl_long s = okl::fstatat(f, ta.buf, &st, okl::at_symlink_nofollow);
     if (okl::failed(s)) return okl::translate(s);
     if ((st.mode & okl::s_ifmt) == okl::s_ifdir) return kal_err_is_directory;
     const okl_long r = okl::sys(okl::nr_linkat, f, reinterpret_cast<okl_long>(ta.buf),
@@ -1118,7 +1111,7 @@ kal_intptr kal_fs_resolved_name(kal_dir base, const char* name, kal_uintptr len,
         asked(b, false, name, len);
         return -kal_err_not_found;
     }
-    const okl_long fd = okl::sys(okl::nr_openat, b, reinterpret_cast<okl_long>(t.buf),
+    const okl_long fd = okl::openat( b, reinterpret_cast<okl_long>(t.buf),
                                  okl::o_path | okl::o_cloexec, 0);
     if (okl::failed(fd)) {
         if (rights && (fd == -okl::e_noent || fd == -okl::e_notdir)) asked(b, false, name, len);
@@ -1198,8 +1191,7 @@ int kal_fs_list_next_info(kal_dir d, kal_uintptr* iter, char* name_out, kal_uint
     if ((wanted & ~KAL_INFO_KIND) != 0) {
         okl::kstat st{};
         const int fd = okl::unpack(d.h);
-        if (!okl::failed(okl::sys(okl::nr_newfstatat, fd, reinterpret_cast<okl_long>(own),
-                                  reinterpret_cast<okl_long>(&st), okl::at_symlink_nofollow))) {
+        if (!okl::failed(okl::fstatat(fd, own, &st, okl::at_symlink_nofollow))) {
             v.self_size = self;
             fill_info(st, wanted, &v, fd);
             v.kind = kind;

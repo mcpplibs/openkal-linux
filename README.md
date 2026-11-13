@@ -8,8 +8,29 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.25.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.26.1"
+openkal-linux = "0.26.2"
 ```
+
+## What 0.26.2 adds
+
+**i386** (openkal 0.25.1, clause 5.5). The kernel's i386 gate (`int $0x80`, the sixth
+argument in `ebp`) and its own table of numbers; where a call has a sixty-four bit
+time form that form is used (`clock_gettime64`, `ppoll_time64`, `futex_time64`,
+`utimensat_time64`, `clock_nanosleep_time64`), and the status of a node comes from
+`statx`, so no answer ends in 2038. The calls whose arguments differ between
+architectures --- a position in two words (`_llseek`, `mmap2`, `pread64`,
+`ftruncate64`), `statfs64`, `O_LARGEFILE` --- are functions of `src/sys.h` that every
+caller uses on every architecture. The thread pointer is a segment set by
+`set_thread_area` and given to a new context by `clone`. A handle is a thirty-two
+bit word there: seventeen bits of descriptor and fifteen of generation; a program's
+handle carries its number and its kind, and an opened program's descriptor.
+`tools/word32-check.sh` builds the implementation standalone for i386 and runs
+`tests/word32/runs.cpp`: a file past four gibibytes, a task with its own
+thread-local storage, a sleep through the sixty-four bit clock.
+
+Also: one record of `rt_sigaction` (the mask is the kernel's sixty-four bit set; it
+was declared three times with an `unsigned long` mask) and one return from a
+handler (it was written twice).
 
 ## What 0.26.1 corrects
 
@@ -398,9 +419,10 @@ rather than call.
 
 ## Architectures
 
-`x86_64` and `aarch64`. Adding one is `src/sys.h`: a calling convention, a table
-of system-call numbers, the kernel's `struct stat`, and the two thread-pointer
-conventions in `src/tls.h`.
+`x86_64`, `aarch64` and `i386`. Adding one is `src/sys.h`: a calling convention, a
+table of system-call numbers, the kernel's `struct stat` (or `statx`), the
+functions for the calls whose arguments the architecture lays out otherwise, and
+the thread-pointer convention in `src/tls.h`.
 
 ## Verification
 

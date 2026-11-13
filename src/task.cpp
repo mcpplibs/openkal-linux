@@ -57,6 +57,45 @@ __asm__(
 "1:ret\n"
 ".size __okl_clone,.-__okl_clone\n"
 );
+#elif defined(__i386__)
+__asm__(
+".text\n"
+".globl __okl_clone\n"
+".hidden __okl_clone\n"
+".type __okl_clone,@function\n"
+"__okl_clone:\n"          // 4(%esp)=fn stack flags arg ptid tls ctid, cdecl
+"  push %ebx\n"
+"  push %esi\n"
+"  push %edi\n"
+"  push %ebp\n"            // the arguments are now at 20(%esp)
+"  mov 20(%esp),%ebp\n"    // fn: the child inherits every register but eax and esp
+"  mov 24(%esp),%ecx\n"    // stack
+"  and $-16,%ecx\n"
+"  sub $16,%ecx\n"
+"  mov 32(%esp),%eax\n"
+"  mov %eax,(%ecx)\n"      // arg, the child's one argument
+"  mov 28(%esp),%ebx\n"    // flags
+"  mov 36(%esp),%edx\n"    // ptid
+"  mov 40(%esp),%esi\n"    // tls (a user_desc on this architecture)
+"  mov 44(%esp),%edi\n"    // ctid
+"  mov $120,%eax\n"        // SYS_clone
+"  int $0x80\n"
+"  test %eax,%eax\n"
+"  jnz 1f\n"
+"  mov %ebp,%eax\n"
+"  xor %ebp,%ebp\n"
+"  call *%eax\n"
+"  mov %eax,%ebx\n"
+"  mov $1,%eax\n"          // SYS_exit, this context only
+"  int $0x80\n"
+"  hlt\n"
+"1:pop %ebp\n"
+"  pop %edi\n"
+"  pop %esi\n"
+"  pop %ebx\n"
+"  ret\n"
+".size __okl_clone,.-__okl_clone\n"
+);
 #elif defined(__aarch64__)
 __asm__(
 ".text\n"
@@ -463,7 +502,7 @@ int translate_posix(int e) {
 // another allocation places later can occupy the addresses beneath the stack.
 bool map_stack(context* c, okl_uptr bytes) {
     const okl_uptr total = bytes + kGuard;
-    const okl_long r = okl::sys(okl::nr_mmap, 0, static_cast<okl_long>(total),
+    const okl_long r = okl::mmap( 0, static_cast<okl_long>(total),
                                 okl::prot_read | okl::prot_write,
                                 okl::map_private | okl::map_anonymous | okl::map_stack, -1, 0);
     if (okl::failed(r)) return false;
@@ -516,8 +555,14 @@ int start(void (*entry)(void*), void* arg, okl_uptr want, kal_task* out) {
                         | 0x00100000   // CLONE_PARENT_SETTID
                         | 0x00200000;  // CLONE_CHILD_CLEARTID
     auto* top = static_cast<unsigned char*>(c->stack) + c->stack_bytes;
+#if defined(__i386__)
+    okl::user_desc desc = okl::tls_descriptor(c->tls.tp);
+    void* const tls_argument = &desc;
+#else
+    void* const tls_argument = c->tls.tp;
+#endif
     const okl_long r = __okl_clone(run, top, flags, c,
-                                   const_cast<int*>(&c->tid), c->tls.tp,
+                                   const_cast<int*>(&c->tid), tls_argument,
                                    const_cast<int*>(&c->tid));
     if (okl::failed(r)) {
         unmap_stack(c);
@@ -554,7 +599,7 @@ namespace {
 
 // A small number from a file of the kernel's: what /sys answers is one line.
 bool read_number(const char* path, okl_long& out) {
-    const okl_long fd = okl::sys(okl::nr_openat, okl::at_fdcwd, reinterpret_cast<okl_long>(path),
+    const okl_long fd = okl::openat( okl::at_fdcwd, reinterpret_cast<okl_long>(path),
                                  okl::o_rdonly | okl::o_cloexec);
     if (okl::failed(fd)) return false;
     char text[32];
@@ -759,7 +804,7 @@ kal_uintptr kal_task_cores(void) {
                                 reinterpret_cast<okl_long>(mask));
     if (okl::failed(n) || n <= 0) return 0;
     constexpr unsigned kMax = 1024;
-    okl_long seen[kMax];
+    okl_i64 seen[kMax];
     unsigned count = 0;
     const unsigned long bits = static_cast<unsigned long>(n) * 8;
     constexpr unsigned long kWord = 8 * sizeof(unsigned long);
@@ -767,7 +812,7 @@ kal_uintptr kal_task_cores(void) {
         if (!((mask[cpu / kWord] >> (cpu % kWord)) & 1ul)) continue;
         okl_long package = 0, core = 0;
         if (!cpu_topology(cpu, "physical_package_id", package) || !cpu_topology(cpu, "core_id", core)) return 0;
-        const okl_long key = (package << 32) | core;
+        const okl_i64 key = (static_cast<okl_i64>(package) << 32) | core;
         bool known = false;
         for (unsigned i = 0; i < count && !known; ++i) known = seen[i] == key;
         if (known) continue;

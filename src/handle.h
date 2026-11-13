@@ -12,6 +12,17 @@ namespace okl {
 
 inline constexpr int kMaxDescriptor = 65536;
 
+// THE WORD IS AN INDEX AND A GENERATION, AND ITS WIDTH DECIDES THE SPLIT. On a
+// sixty-four bit word the index is the low thirty-two bits and the generation
+// the high; on i386 the index needs seventeen (a descriptor below 65536, plus
+// one) and the generation has the other fifteen, so staleness is detected for
+// a number reused fewer than 32768 times between a release and a use --- what
+// clause 5.5 of the specification allows a thirty-two bit word.
+inline constexpr unsigned kIndexBits = sizeof(okl_uptr) == 8 ? 32u : 17u;
+inline constexpr okl_uptr kIndexMask = (okl_uptr{1} << kIndexBits) - 1u;
+inline constexpr unsigned kGenerationMask =
+    sizeof(okl_uptr) == 8 ? ~0u : static_cast<unsigned>((okl_uptr{1} << (32u - kIndexBits)) - 1u);
+
 inline unsigned* generations() {
     static unsigned g[kMaxDescriptor];
     return g;
@@ -26,7 +37,7 @@ inline unsigned generation(int fd) {
 
 inline okl_uptr pack(int fd) {
     if (fd < 0 || fd >= kMaxDescriptor) return 0;
-    return (static_cast<okl_uptr>(generation(fd)) << 32)
+    return (static_cast<okl_uptr>(generation(fd) & kGenerationMask) << kIndexBits)
          | (static_cast<okl_uptr>(fd) + 1u);
 }
 
@@ -44,9 +55,9 @@ inline okl_uptr pack(int fd) {
 // kal_dir, kal_net_listener, kal_net_conn, kal_datagram --- are the whole of
 // this function's domain.
 inline int unpack(okl_uptr h) {
-    const int fd = static_cast<int>(h & 0xffffffffu) - 1;
+    const int fd = static_cast<int>(h & kIndexMask) - 1;
     if (fd < 0 || fd >= kMaxDescriptor) return -1;
-    if (static_cast<unsigned>(h >> 32) != generation(fd)) return -1;
+    if (static_cast<unsigned>(h >> kIndexBits) != (generation(fd) & kGenerationMask)) return -1;
     return fd;
 }
 
@@ -58,18 +69,21 @@ inline int unpack(okl_uptr h) {
 // descriptor is never closed (openkal-linux#53). Every release in this
 // implementation is `release(h)`, which keeps the order in one place.
 inline bool retire(okl_uptr h) {
-    const int fd = static_cast<int>(h & 0xffffffffu) - 1;
+    const int fd = static_cast<int>(h & kIndexMask) - 1;
     if (fd < 0 || fd >= kMaxDescriptor) return false;
     // One release of a handle advances its generation; a second release of the
     // same word, in this context or another, finds it advanced and closes
-    // nothing, so it cannot close a descriptor opened since.
-    unsigned held = static_cast<unsigned>(h >> 32);
+    // nothing, so it cannot close a descriptor opened since. The word carries
+    // the generation's low bits (all of them on a sixty-four bit word), so the
+    // counter it is compared with is read first and only that one advanced.
+    unsigned held = generation(fd);
+    if ((held & kGenerationMask) != static_cast<unsigned>(h >> kIndexBits)) return false;
     return __atomic_compare_exchange_n(&generations()[fd], &held, held + 1u, false,
                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 }
 
 inline void release(okl_uptr h) {
-    const int fd = static_cast<int>(h & 0xffffffffu) - 1;
+    const int fd = static_cast<int>(h & kIndexMask) - 1;
     if (retire(h)) sys(nr_close, fd);
 }
 

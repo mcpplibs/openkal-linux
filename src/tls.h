@@ -39,10 +39,18 @@ inline okl_uptr round_up(okl_uptr n, okl_uptr to) { return (n + to - 1) & ~(to -
 // loader has already applied any bias, so the addresses are the ones the
 // program will use.
 inline void describe_tls(okl_ulong phdr, okl_ulong phent, okl_ulong phnum) {
+    // The program headers of this program's own class: ELF32 on i386 orders
+    // the fields otherwise and makes each a word.
+#if defined(__i386__)
+    struct elf_phdr {
+        okl_u32 type, offset, vaddr, paddr, filesz, memsz, flags, align;
+    };
+#else
     struct elf_phdr {
         okl_u32 type, flags;
         okl_u64 offset, vaddr, paddr, filesz, memsz, align;
     };
+#endif
     constexpr okl_u32 pt_tls = 7;
     auto& im = image();
     im.known = true;
@@ -140,7 +148,7 @@ inline tls_block make_tls(void* (*alloc)(okl_uptr, okl_uptr)) {
     // program cannot see. The caller of `kal_task_start' is told instead.
     if (im.memsz == 0) return b;
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__i386__)
     // Variant II: the storage lies below the thread pointer, and the word the
     // thread pointer addresses holds the thread pointer itself, which is how a
     // program obtains it without an instruction that reads the register.
@@ -174,8 +182,34 @@ inline tls_block make_tls(void* (*alloc)(okl_uptr, okl_uptr)) {
     return b;
 }
 
+#if defined(__i386__)
+// THE THREAD POINTER IS A SEGMENT ON i386: a descriptor in the global table
+// whose base is the pointer, selected by %gs. The kernel gives the process one
+// entry the first time (`entry_number' -1) and the same entry is then filled
+// for each context, at its start by `clone' (CLONE_SETTLS takes this record
+// here, not the pointer).
+struct user_desc {
+    unsigned entry_number, base_addr, limit;
+    unsigned flags;   // seg_32bit 1, contents 0, read_exec_only 0, limit_in_pages 1, useable 1
+};
+inline unsigned& tls_entry() {
+    static unsigned entry = static_cast<unsigned>(-1);
+    return entry;
+}
+inline user_desc tls_descriptor(void* tp) {
+    return user_desc{ tls_entry(), static_cast<unsigned>(reinterpret_cast<okl_uptr>(tp)), 0xfffffu,
+                      0x1u | 0x10u | 0x40u };
+}
+#endif
+
 inline void set_thread_pointer(void* tp) {
-#if defined(__x86_64__)
+#if defined(__i386__)
+    user_desc d = tls_descriptor(tp);
+    if (failed(sys(nr_set_thread_area, reinterpret_cast<okl_long>(&d)))) return;
+    tls_entry() = d.entry_number;
+    const unsigned short selector = static_cast<unsigned short>(d.entry_number * 8 + 3);
+    __asm__ __volatile__("movw %w0, %%gs" :: "q"(selector));
+#elif defined(__x86_64__)
     sys(nr_arch_prctl, 0x1002 /* ARCH_SET_FS */, reinterpret_cast<okl_long>(tp));
 #elif defined(__aarch64__)
     __asm__ __volatile__("msr tpidr_el0, %0" :: "r"(tp));
