@@ -8,8 +8,21 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.25.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.26.2"
+openkal-linux = "0.26.3"
 ```
+
+## What 0.26.3 corrects
+
+**The processor time on i386.** The program's processor time and the monotonic
+clock read for an observation were read from the sixty-four bit `clock_gettime`
+into records of two words, so the seconds were taken as the fraction and the
+fraction was lost; both read `okl::ktimespec`, the record that call writes.
+`tests/word32/runs.cpp` measures the processor time of 50 ms of work.
+
+**The specification by its minor version.** The manifest declares `openkal =
+"^0.25.0"`: an implementation written against a patch release conforms to every
+later patch of that minor version (openkal clause 8), and a consumer that names
+one resolves with it.
 
 ## What 0.26.2 adds
 
