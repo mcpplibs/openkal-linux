@@ -628,7 +628,22 @@ struct ktimespec { okl_i64 sec; okl_i64 nsec; };
 // supports --- two words on i386, where an `unsigned long' mask was half of it
 // and the size the call is told (`sizeof mask') was refused. One declaration for
 // every unit that installs a handler.
-struct k_sigaction { void* handler; okl_ulong flags; void* restorer; okl_u64 mask; };
+// The kernel's signal set: sixty-four bits on every architecture this
+// implementation supports, two words on i386 --- where an `unsigned long' set
+// was half of it and the size a call is told was refused (measured:
+// `rt_sigprocmask(..., 4) = -EINVAL', and no program could be started).
+using ksigset = okl_u64;
+
+// THE KERNEL'S `siginfo_t' AS `waitid' WRITES IT: three ints (signal, error,
+// code), then the union, aligned to a pointer --- at sixteen on a sixty-four bit
+// word and twelve on i386, where reading at sixteen took the user for the
+// identifier and an exit status of 33 was reported as 0 (measured). For a child:
+// the identifier, the user, then the status.
+constexpr okl_uptr si_code_at   = 8;
+constexpr okl_uptr si_fields_at = sizeof(void*) == 8 ? 16 : 12;
+constexpr okl_uptr si_pid_at    = si_fields_at;
+constexpr okl_uptr si_status_at = si_fields_at + 8;
+struct k_sigaction { void* handler; okl_ulong flags; void* restorer; ksigset mask; };
 constexpr okl_ulong sa_restorer_flag = 0x04000000u;  // SA_RESTORER
 
 }  // namespace okl

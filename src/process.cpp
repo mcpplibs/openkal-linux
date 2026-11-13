@@ -640,7 +640,7 @@ struct start_plan {
     const char*            resolved;
     bool                   named, use_name, unit, bind;
     okl_long               join, mine;
-    const unsigned long*   mask;
+    const okl::ksigset*    mask;
     const conveyance*      carry;      // 0.23: the records placed after the grants
     bool                   confine;    // 0.23: held to the grants by Landlock
     const okl_u32*         grant_rights;
@@ -1058,7 +1058,7 @@ int kal_process_spawn(const kal_spawn* how,
     // program run in the image would run in this program's memory; so the image
     // sets every handler to the default first, and only then takes the mask the
     // caller had (start_image).
-    unsigned long every = ~0ul, caller_mask = 0;
+    okl::ksigset every = ~okl::ksigset{0}, caller_mask = 0;
     okl::sys(okl::nr_rt_sigprocmask, 2 /* SIG_SETMASK */, reinterpret_cast<okl_long>(&every),
              reinterpret_cast<okl_long>(&caller_mask), sizeof every);
     const start_plan plan{ how, &p, granted, b, w, in, ou, er, &args, &envs, &report, resolved,
@@ -1318,7 +1318,13 @@ bool arm_one(int signo) {
     }
     act.handler = reinterpret_cast<void*>(&stop_handler);
 #if defined(__x86_64__) || defined(__i386__)
-    act.flags   = sa_restorer_flag;
+    // On i386 the kernel builds the frame `rt_sigreturn' leaves only for a
+    // handler installed with SA_SIGINFO, and the legacy frame otherwise, whose
+    // return is another call: the shared restorer is `rt_sigreturn', so the
+    // flag is stated there (measured: a request to end never reached the
+    // program that had taken requests over). A handler of one `int' ignores the
+    // other two arguments under this convention.
+    act.flags    = sa_restorer_flag | (sizeof(void*) == 4 ? 4u /* SA_SIGINFO */ : 0u);
     act.restorer = reinterpret_cast<void*>(&okl_signal_return);
 #endif
     return !okl::failed(okl::sys(okl::nr_rt_sigaction, signo,
@@ -1516,7 +1522,7 @@ bool has_ended(kal_process h) {
     if (r == -okl::e_child) return true;
     if (okl::failed(r)) return false;
     int si_pid = 0;
-    okl::copy(reinterpret_cast<char*>(&si_pid), reinterpret_cast<const char*>(info + 16), sizeof si_pid);
+    okl::copy(reinterpret_cast<char*>(&si_pid), reinterpret_cast<const char*>(info + okl::si_pid_at), sizeof si_pid);
     return si_pid != 0;
 }
 
@@ -1638,11 +1644,17 @@ int kal_process_end_as_requested(void) {
     if (signo == 0) signo = 15;
     okl::k_sigaction act {};
 #if defined(__x86_64__) || defined(__i386__)
-    act.flags    = sa_restorer_flag;
+    // On i386 the kernel builds the frame `rt_sigreturn' leaves only for a
+    // handler installed with SA_SIGINFO, and the legacy frame otherwise, whose
+    // return is another call: the shared restorer is `rt_sigreturn', so the
+    // flag is stated there (measured: a request to end never reached the
+    // program that had taken requests over). A handler of one `int' ignores the
+    // other two arguments under this convention.
+    act.flags    = sa_restorer_flag | (sizeof(void*) == 4 ? 4u /* SA_SIGINFO */ : 0u);
     act.restorer = reinterpret_cast<void*>(&okl_signal_return);
 #endif
     okl::sys(okl::nr_rt_sigaction, signo, reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
-    unsigned long set = 1ul << (signo - 1);
+    okl::ksigset set = okl::ksigset{1} << (signo - 1);
     okl::sys(okl::nr_rt_sigprocmask, 1 /* SIG_UNBLOCK */, reinterpret_cast<okl_long>(&set), 0, sizeof set);
     okl::sys(okl::nr_kill, okl::sys(okl::nr_getpid), signo);
     for (int i = 0; i < 100; ++i) {
@@ -1770,7 +1782,7 @@ bool ended_usage(okl_long pid, k_rusage& ru) {
                                 reinterpret_cast<okl_long>(&ru));
     if (okl::failed(r)) return false;
     int si_pid = 0;
-    okl::copy(&si_pid, info + 16, sizeof si_pid);
+    okl::copy(&si_pid, info + okl::si_pid_at, sizeof si_pid);
     return si_pid != 0;
 }
 
@@ -1944,9 +1956,9 @@ int child_outcome(okl_long pid, bool block, int* status, int* terminated, bool& 
     ended = false;
     if (okl::failed(r)) return okl::translate(r);
     int si_pid = 0, si_code = 0, si_status = 0;
-    okl::copy(&si_code, info + 8, sizeof si_code);
-    okl::copy(&si_pid, info + 16, sizeof si_pid);
-    okl::copy(&si_status, info + 24, sizeof si_status);
+    okl::copy(&si_code, info + okl::si_code_at, sizeof si_code);
+    okl::copy(&si_pid, info + okl::si_pid_at, sizeof si_pid);
+    okl::copy(&si_status, info + okl::si_status_at, sizeof si_status);
     if (si_pid == 0) return kal_ok;          // not yet
     ended = true;
     if (si_code == 1 /* CLD_EXITED */) {

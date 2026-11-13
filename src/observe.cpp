@@ -282,7 +282,10 @@ const char* fault_name(int signo, int code) {
     }
 }
 
-struct siginfo_head { int signo, errnum, code, pad; okl_uptr addr; };
+// signal, error, code, then the union at a pointer's alignment (okl::si_fields_at): a
+// fault's address first --- offset 16 on a sixty-four bit word, 12 on i386.
+struct siginfo_head { int signo, errnum, code; alignas(sizeof(void*)) okl_uptr addr; };
+static_assert(__builtin_offsetof(siginfo_head, addr) == okl::si_fields_at, "siginfo_t");
 
 void report(int signo, void* info, void* uc) {
     const auto* si = static_cast<const siginfo_head*>(info);

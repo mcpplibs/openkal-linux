@@ -24,9 +24,16 @@ caller uses on every architecture. The thread pointer is a segment set by
 `set_thread_area` and given to a new context by `clone`. A handle is a thirty-two
 bit word there: seventeen bits of descriptor and fifteen of generation; a program's
 handle carries its number and its kind, and an opened program's descriptor.
+The kernel's records whose layout follows the word are read at the word's offsets:
+`waitid`'s `siginfo_t` (its union at twelve, not sixteen), the signal set
+(sixty-four bits, `rt_sigprocmask` refused four bytes), and a handler is installed
+with `SA_SIGINFO` so the kernel builds the frame `rt_sigreturn` leaves.
 `tools/word32-check.sh` builds the implementation standalone for i386 and runs
 `tests/word32/runs.cpp`: a file past four gibibytes, a task with its own
-thread-local storage, a sleep through the sixty-four bit clock.
+thread-local storage, a sleep through the sixty-four bit clock. Measured locally
+with the family built for `i686-linux-musl` (openkal-musl and openkal-llvm-runtime
+for i386): the specification's conformance suite, `full,optional`, 408 held and
+none did not, the five not observed being x86_64's five.
 
 Also: one record of `rt_sigaction` (the mask is the kernel's sixty-four bit set; it
 was declared three times with an `unsigned long` mask) and one return from a
