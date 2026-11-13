@@ -27,6 +27,10 @@ __asm__(".text\n.globl okl_signal_return\n.type okl_signal_return,@function\nokl
 __asm__(".text\n.globl okl_signal_return\n.type okl_signal_return,@function\nokl_signal_return:\n"
         "  mov x8, #139\n  svc #0\n");
 #endif
+#if defined(__x86_64__) || defined(__i386__) || defined(__aarch64__)
+extern "C" void okl_signal_return();
+void* okl::signal_return() { return reinterpret_cast<void*>(&okl_signal_return); }
+#endif
 extern "C" void okl_fault_handler(int signo, void* info, void* uc);
 extern "C" void okl_sample_handler(int signo, void* info, void* uc);
 

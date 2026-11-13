@@ -1325,7 +1325,7 @@ bool arm_one(int signo) {
     // program that had taken requests over). A handler of one `int' ignores the
     // other two arguments under this convention.
     act.flags    = sa_restorer_flag | (sizeof(void*) == 4 ? 4u /* SA_SIGINFO */ : 0u);
-    act.restorer = reinterpret_cast<void*>(&okl_signal_return);
+    act.restorer = okl::signal_return();
 #endif
     return !okl::failed(okl::sys(okl::nr_rt_sigaction, signo,
                                  reinterpret_cast<okl_long>(&act), 0, sizeof act.mask));
@@ -1651,7 +1651,7 @@ int kal_process_end_as_requested(void) {
     // program that had taken requests over). A handler of one `int' ignores the
     // other two arguments under this convention.
     act.flags    = sa_restorer_flag | (sizeof(void*) == 4 ? 4u /* SA_SIGINFO */ : 0u);
-    act.restorer = reinterpret_cast<void*>(&okl_signal_return);
+    act.restorer = okl::signal_return();
 #endif
     okl::sys(okl::nr_rt_sigaction, signo, reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
     okl::ksigset set = okl::ksigset{1} << (signo - 1);

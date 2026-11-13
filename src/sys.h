@@ -646,11 +646,11 @@ constexpr okl_uptr si_status_at = si_fields_at + 8;
 struct k_sigaction { void* handler; okl_ulong flags; void* restorer; ksigset mask; };
 constexpr okl_ulong sa_restorer_flag = 0x04000000u;  // SA_RESTORER
 
-}  // namespace okl
 // The return from a handler this implementation installs, which a handler
-// installed without a C library must name on x86_64 and i386 (observe.cpp).
-extern "C" void okl_signal_return();
-namespace okl {
+// installed without a C library must name on x86_64 and i386: one sequence
+// (observe.cpp), reached through this function so that no unit names another
+// unit's symbol outside this namespace (the independence check).
+void* signal_return();
 
 // --- the calls whose arguments are not the same on every architecture ----------
 //
