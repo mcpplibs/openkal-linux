@@ -5,11 +5,35 @@ for Linux, written on the kernel's own system-call interface.
 
 ```toml
 [dependencies]
-openkal = "0.25.0"
+openkal = "0.26.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.26.3"
+openkal-linux = "0.27.0"
 ```
+
+## What 0.27 changes (openkal 0.26)
+
+**A start is bounded by the kernel alone** (clause 7.6). An argument vector or an
+environment of more than 512 entries was refused and reported as
+`kal_err_no_memory`; the constant guarded no buffer, since both vectors are
+allocated at their measured size. It is removed: the kernel bounds bytes, a quarter
+of the stack limit in all and 128 KiB for one string, and its refusal (`E2BIG`) is
+reported as `kal_err_no_space`, where it was `kal_err_io`.
+`tests/a_start_is_bounded_by_the_kernel_alone.cpp` starts a shell with 2,000
+arguments, with 2,000 variables, and with a string of 200 KiB.
+
+**A unit's reference names its process space exactly** (clause 7.18). A reference
+held the text of `/proc/self/ns/pid`, and the kernel gives the number of a
+namespace that has ended to a later one (measured: four namespaces made one after
+another bore one number), so a reference from one was answered in the next from a
+process group that had nothing to do with it. The reference (`L3`) adds the start
+of the space's first program. A reference of another boot is `empty`, and so is
+one whose number a program of another start now holds: a number is given again
+only once no program holds it as its group. A reference of another space of this
+boot is refused by `kal_process_job_open` with `kal_err_not_supported`, as is one
+in the earlier form (`L2`), which does not say which space it was made in.
+`KAL_PROCESS_PROP_JOB_OBSERVE` is claimed only where the boot's name, the space
+and the caller's start can be read. `tests/a_unit_reference_names_its_boot_and_space.cpp`.
 
 ## What 0.26.3 corrects
 
