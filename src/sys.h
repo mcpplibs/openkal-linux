@@ -352,7 +352,7 @@ enum : okl_long {
 // appear here rather than being taken from a header: the header belongs to a
 // C library and this implementation has none.
 enum : int {
-    e_perm = 1, e_noent = 2, e_intr = 4, e_io = 5, e_noexec = 8, e_badf = 9,
+    e_perm = 1, e_noent = 2, e_intr = 4, e_io = 5, e_2big = 7, e_noexec = 8, e_badf = 9,
     e_child = 10,
     e_again = 11, e_nomem = 12, e_acces = 13, e_fault = 14, e_busy = 16,
     e_exist = 17, e_xdev = 18, e_nodev = 19, e_notdir = 20, e_isdir = 21,
@@ -458,7 +458,10 @@ inline int translate(okl_long r) {
         case e_loop: case e_spipe:                       return 1;  // kal_err_invalid
         case e_again:                                    return 2;  // kal_err_again
         case e_nomem:                                    return 4;  // kal_err_no_memory
-        case e_nospc: case e_fbig: case e_dquot:         return 5;  // kal_err_no_space
+        // A start the kernel refuses for the size of its vectors (E2BIG) is a
+        // request that does not fit, as a write that does not fit is: clause 7.6.
+        case e_nospc: case e_fbig: case e_dquot:
+        case e_2big:                                     return 5;  // kal_err_no_space
         case e_acces: case e_perm: case e_rofs:          return 6;  // kal_err_permission
         case e_nosys:                                    return 7;  // kal_err_not_supported
         case e_pipe: case e_connreset:                   return 8;  // kal_err_closed
