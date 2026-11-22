@@ -30,8 +30,6 @@ bool same_prefix(const char* a, const char* b, okl_uptr n) {
 // peak, and in `rest' the counts that follow, the page faults at 3 and 4.
 struct k_rusage { okl_long utime_s, utime_us, stime_s, stime_us, maxrss; okl_long rest[13]; };
 
-constexpr okl_uptr kMaxEntries = 512;
-
 constexpr char     kPreopens[]  = "KAL_PREOPENS=";
 constexpr okl_uptr kPreopensLen = sizeof kPreopens - 1;
 constexpr okl_uptr kPidDigits   = 10;
@@ -137,7 +135,6 @@ struct vector {
     bool   ok = true;
 
     bool build(const char** items, const kal_uintptr* lens, kal_uintptr n) {
-        if (n > kMaxEntries) { ok = false; return false; }
         okl_uptr total = 0;
         for (kal_uintptr i = 0; i < n; ++i) total += lens[i] + 1;
         slots_bytes = (n + 1) * sizeof(char*);
@@ -181,7 +178,6 @@ struct vector {
 
     bool build_env(const char** items, const kal_uintptr* lens, kal_uintptr n,
                    const kal_preopen* grants, kal_uintptr g, const conveyance& c) {
-        if (n > kMaxEntries) { ok = false; return false; }
         auto left_out = [&](const char* s, kal_uintptr l) {
             return names_preopens(s, l) || starts_with(s, l, kRights, kRightsLen)
                 || starts_with(s, l, kResources, kResourcesLen);
@@ -381,6 +377,8 @@ inline void reap(okl_long child) {
 }
 
 }  // namespace
+
+namespace { bool units_observable(); }   // defined beside the unit's reference
 
 extern "C" {
 
@@ -1665,8 +1663,12 @@ int kal_process_end_as_requested(void) {
     for (;;) { }
 }
 
+// Observation is claimed where a reference can be made (clause 7.18): an
+// environment that hides the boot's name or the space's first program states no
+// origin, so a unit declared there could not be told from another's.
 kal_uintptr kal_process_props(void) {
-    return KAL_PROCESS_PROP_JOB_OBSERVE | KAL_PROCESS_PROP_TERMINATE | KAL_PROCESS_PROP_STREAM_PASSING
+    return (units_observable() ? KAL_PROCESS_PROP_JOB_OBSERVE : 0u)
+         | KAL_PROCESS_PROP_TERMINATE | KAL_PROCESS_PROP_STREAM_PASSING
          | KAL_PROCESS_PROP_EXIT_STATUS
          | KAL_PROCESS_PROP_CHANNEL | KAL_PROCESS_PROP_GRANT_DIR
          | KAL_PROCESS_PROP_BOUND_LIFETIME
@@ -2015,14 +2017,37 @@ int kal_process_job_limit(kal_job j, kal_uintptr kind, kal_u64 value) {
 
 // Observable units (openkal 0.24). The unit stays the kernel's own group;
 // identity validation does not create a registry or infer quiet from a leader.
+//
+// A REFERENCE NAMES ITS PROCESS SPACE EXACTLY (openkal 0.26, clause 7.18). The
+// space was the text of /proc/self/ns/pid alone until then, and the kernel
+// gives a namespace that has ended its number to a later one --- measured: four
+// namespaces made one after another, each named pid:[4026533469]. A reference
+// from one was read in the next as this space's, and answered from a process
+// group there that had nothing to do with it. The space is now that text and
+// the start of the space's first program, which no two spaces of one boot share.
+//
+// WHAT AN OBSERVATION CAN ESTABLISH, AND WHAT IT CANNOT (clause 7.18):
+//   another boot           every program of it has ended                 EMPTY
+//   this space, no group   the kernel holds no such group                EMPTY
+//   this space, the number is another program's
+//                          a number is given again only once no program
+//                          holds it as its group, so the unit ended      EMPTY
+//   this space, the group                                                OCCUPIED
+//   another space of this boot
+//                          its programs cannot be enumerated from here:
+//                          `open' refuses, and that answer does not change
 #include "unit_reference.h"
 namespace {
 struct unit_identity {
-    kal_u64 group = 0, birth = 0;
+    kal_u64 group = 0, birth = 0, space_birth = 0;
     char boot[64]{}, space[64]{};
+    bool exact = false;   // an L3 reference; an L2 one names its space by number only
 };
 bool unit_birth(okl_long pid, kal_u64& value) { okl_u64 ticks = 0; if (!started_ticks(pid,ticks)) return false; value = ticks; return true; }
-bool unit_origin(char* boot, char* space) {
+// The boot, the space and the start of the space's first program, or nothing
+// where one of them cannot be read: a reference is then not made, and the
+// property is not claimed (kal_process_props).
+bool unit_origin(char* boot, char* space, kal_u64& space_birth) {
     if (self_number() != okl::sys(okl::nr_getpid)) return false;
     const auto fd = okl::openat( okl::at_fdcwd,
         reinterpret_cast<okl_long>("/proc/sys/kernel/random/boot_id"), okl::o_rdonly | okl::o_cloexec, 0);
@@ -2035,19 +2060,43 @@ bool unit_origin(char* boot, char* space) {
     n = okl::sys(okl::nr_readlinkat, okl::at_fdcwd,
         reinterpret_cast<okl_long>("/proc/self/ns/pid"), reinterpret_cast<okl_long>(space), 63);
     if (n <= 0 || n >= 63) return false;
-    space[n] = 0; return true;
+    space[n] = 0;
+    return unit_birth(1, space_birth) && space_birth != 0;
 }
 bool unit_parse(const char* p, kal_uintptr n, unit_identity& u) {
     if (!p || n == 0 || n > 256) return false;
     unit_reference::reader r{p,n}; char kind[8]{};
-    return r.token(kind, sizeof kind) && unit_reference::same(kind,"L2")
-        && r.number(u.group) && u.group > 0 && u.group <= 0x7fffffffu
-        && r.number(u.birth) && u.birth != 0
-        && r.token(u.boot,sizeof u.boot) && r.token(u.space,sizeof u.space) && r.at == n;
+    if (!r.token(kind, sizeof kind)) return false;
+    u.exact = unit_reference::same(kind,"L3");
+    if (!u.exact && !unit_reference::same(kind,"L2")) return false;
+    if (!(r.number(u.group) && u.group > 0 && u.group <= 0x7fffffffu
+          && r.number(u.birth) && u.birth != 0
+          && r.token(u.boot,sizeof u.boot) && r.token(u.space,sizeof u.space))) return false;
+    if (u.exact && !(r.number(u.space_birth) && u.space_birth != 0)) return false;
+    return r.at == n;
 }
-bool unit_same_origin(const unit_identity& u) {
-    char boot[64]{}, space[64]{};
-    return unit_origin(boot,space) && unit_reference::same(u.boot,boot) && unit_reference::same(u.space,space);
+enum class origin { here, another_boot, another_space, unreadable };
+origin unit_origin_of(const unit_identity& u) {
+    char boot[64]{}, space[64]{}; kal_u64 space_birth = 0;
+    if (!unit_origin(boot,space,space_birth)) return origin::unreadable;
+    if (!unit_reference::same(u.boot,boot)) return origin::another_boot;
+    // An L2 reference does not say which of the spaces that have borne this
+    // number it was made in, so it is this one's only by assumption.
+    if (!u.exact || !unit_reference::same(u.space,space) || u.space_birth != space_birth)
+        return origin::another_space;
+    return origin::here;
+}
+// Whether this environment lets a reference be made: read once, since the
+// answer is a property of where the program runs.
+bool units_observable() {
+    static int known = -1;
+    int k = __atomic_load_n(&known, __ATOMIC_ACQUIRE);
+    if (k < 0) {
+        char boot[64]{}, space[64]{}; kal_u64 space_birth = 0, own = 0;
+        k = unit_origin(boot,space,space_birth) && unit_birth(0,own) && own != 0 ? 1 : 0;
+        __atomic_store_n(&known, k, __ATOMIC_RELEASE);
+    }
+    return k == 1;
 }
 }
 extern "C" {
@@ -2056,9 +2105,9 @@ int kal_process_job_create(kal_job* out, char* reference, kal_uintptr capacity, 
     if (capacity < 256) return kal_err_no_space;
     unit_identity u;
     u.group = static_cast<kal_u64>(okl::sys(okl::nr_getpid));
-    if (!unit_origin(u.boot,u.space)||!unit_birth(0,u.birth)||!u.birth) return kal_err_not_supported;
-    unit_reference::writer w; w.text("L2;"); w.number(u.group); w.next(); w.number(u.birth); w.next();
-    w.text(u.boot); w.next(); w.text(u.space);
+    if (!unit_origin(u.boot,u.space,u.space_birth)||!unit_birth(0,u.birth)||!u.birth) return kal_err_not_supported;
+    unit_reference::writer w; w.text("L3;"); w.number(u.group); w.next(); w.number(u.birth); w.next();
+    w.text(u.boot); w.next(); w.text(u.space); w.next(); w.number(u.space_birth);
     if (!w.valid) return kal_err_no_space;
     kal_job job{}; const int rc = kal_process_job_enter(&job);
     if (rc != kal_ok) return rc;
@@ -2067,18 +2116,21 @@ int kal_process_job_create(kal_job* out, char* reference, kal_uintptr capacity, 
 int kal_process_job_open(const char* reference, kal_uintptr length, kal_job* out) {
     if (!out) return kal_err_invalid;
     unit_identity u; if (!unit_parse(reference,length,u)) return kal_err_invalid;
-    if (!unit_same_origin(u)) return kal_err_not_supported;
+    const origin o = unit_origin_of(u);
+    if (o == origin::another_space || o == origin::unreadable) return kal_err_not_supported;
     out->h = static_cast<kal_uintptr>(u.group); return kal_ok;
 }
 int kal_process_job_observe(kal_job job, const char* reference, kal_uintptr length, kal_u32* state) {
     if (!state) return kal_err_invalid; *state = KAL_JOB_UNKNOWN;
     unit_identity u; if (!unit_parse(reference,length,u) || job.h != u.group) return kal_err_invalid;
-    if (!unit_same_origin(u)) return kal_ok;
+    const origin o = unit_origin_of(u);
+    if (o == origin::another_boot) { *state = KAL_JOB_EMPTY; return kal_ok; }
+    if (o != origin::here) return kal_ok;
     const auto status = okl::sys(okl::nr_kill,-static_cast<okl_long>(u.group),0);
     if (status == -3 /* ESRCH */) { *state = KAL_JOB_EMPTY; return kal_ok; }
     if (okl::failed(status)) return kal_ok;
     okl_u64 birth = 0;
-    if (started_ticks(static_cast<okl_long>(u.group),birth) && birth != u.birth) return kal_ok;
+    if (started_ticks(static_cast<okl_long>(u.group),birth) && birth != u.birth) { *state = KAL_JOB_EMPTY; return kal_ok; }
     *state = KAL_JOB_OCCUPIED; return kal_ok;
 }
 int kal_process_job_retire(kal_job job, const char* reference, kal_uintptr length,
@@ -2086,7 +2138,7 @@ int kal_process_job_retire(kal_job job, const char* reference, kal_uintptr lengt
     if (!state) return kal_err_invalid; *state = KAL_JOB_UNKNOWN;
     unit_identity u; if (!unit_parse(reference,length,u) || job.h != u.group) return kal_err_invalid;
     okl_u64 birth = 0;
-    if (static_cast<kal_u64>(okl::sys(okl::nr_getpid)) != u.group || !unit_same_origin(u)
+    if (static_cast<kal_u64>(okl::sys(okl::nr_getpid)) != u.group || unit_origin_of(u) != origin::here
         || !started_ticks(0,birth) || birth != u.birth) return kal_err_permission;
     if (!continuation || !continuation->id || continuation->id > 0x7fffffffu || !continuation->started_ns)
         return kal_ok;
