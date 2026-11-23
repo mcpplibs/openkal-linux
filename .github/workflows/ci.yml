@@ -208,6 +208,10 @@ jobs:
 
       - name: This package's own tests
         run: |
+          # The run's own status decides as well: through `tee' without
+          # pipefail a program that failed to compile in a subdirectory of
+          # tests/ passed the step, since the list below names tests/*.cpp only.
+          set -o pipefail
           mcpp test 2>&1 | tee tests.log
           # A suite that discovered nothing reports success, so every suite is
           # asserted to have run. The list is derived from the files present
