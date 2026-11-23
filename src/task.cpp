@@ -119,6 +119,33 @@ __asm__(
 "  svc #0\n"
 ".size __okl_clone,.-__okl_clone\n"
 );
+#elif defined(__riscv)
+__asm__(
+".text\n"
+".globl __okl_clone\n"
+".hidden __okl_clone\n"
+".type __okl_clone,%function\n"
+"__okl_clone:\n"          // a0=fn a1=stack a2=flags a3=arg a4=ptid a5=tls a6=ctid
+"  andi a1,a1,-16\n"
+"  addi a1,a1,-16\n"
+"  sd a0,0(a1)\n"
+"  sd a3,8(a1)\n"
+"  slli a0,a2,32\n"       // the flags, zero-extended
+"  srli a0,a0,32\n"
+"  mv a2,a4\n"
+"  mv a3,a5\n"
+"  mv a4,a6\n"
+"  li a7,220\n"           // SYS_clone
+"  ecall\n"
+"  beqz a0,1f\n"
+"  ret\n"
+"1:ld a1,0(sp)\n"
+"  ld a0,8(sp)\n"
+"  jalr a1\n"
+"  li a7,93\n"            // SYS_exit, this context only
+"  ecall\n"
+".size __okl_clone,.-__okl_clone\n"
+);
 #endif
 
 // In both arrangements: a program is started by it as well (process.cpp,

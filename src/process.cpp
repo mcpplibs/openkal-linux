@@ -772,7 +772,7 @@ int start_image(void* arg) {
     // SIGPIPE AS THIS PROGRAM WAS STARTED WITH, not as this implementation
     // set it for its own writes (env.cpp): an ignore would outlive `execve'.
     if (!okl::g_pipe_started_ignored) {
-        okl::k_sigaction standard{ nullptr /* SIG_DFL */, 0, nullptr, 0 };
+        okl::k_sigaction standard{};  // SIG_DFL
         okl::sys(okl::nr_rt_sigaction, 13 /* SIGPIPE */,
                  reinterpret_cast<okl_long>(&standard), 0, sizeof standard.mask);
     }

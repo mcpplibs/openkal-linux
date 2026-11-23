@@ -826,8 +826,7 @@ int kal_fs_rename(kal_dir from, const char* a, kal_uintptr alen,
     okl::terminated ta(a, alen), tb(b, blen);
     if (!ta.ok || !tb.ok) return kal_err_invalid;
     if (refused_write(f) || refused_write(t2)) return kal_err_permission;
-    const okl_long r = okl::sys(okl::nr_renameat, f, reinterpret_cast<okl_long>(ta.buf),
-                                t2, reinterpret_cast<okl_long>(tb.buf));
+    const okl_long r = okl::renameat(f, ta.buf, t2, tb.buf);
     if (okl::failed(r)) return okl::translate(r);
     wrote(f, a, alen);
     wrote(t2, b, blen);

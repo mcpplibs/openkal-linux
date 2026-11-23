@@ -1,7 +1,7 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-linux"
-version     = "0.27.0"
+version     = "0.27.1"
 description = "The reference implementation of openkal for Linux, written on the kernel's own system-call interface so that it can be placed beneath a C library as well as above one."
 license     = "Apache-2.0"
 
@@ -95,10 +95,10 @@ flags = [
                                  "-fno-asynchronous-unwind-tables"] },
 ]
 
-# tests/word32/ is built standalone for i386 by tools/word32-check.sh, with the C library facilities
-# it supplies itself; the host's test programs are the others.
+# tests/arch/ is built standalone for i386 and riscv64 by tools/arch-check.sh, with the C library
+# facilities it supplies itself; the host's test programs are the others.
 [test]
-discover = ["tests/**/*.cpp", "!tests/word32/**"]
+discover = ["tests/**/*.cpp", "!tests/arch/**"]
 
 [features]
 default = []

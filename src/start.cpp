@@ -106,6 +106,28 @@ __asm__(
 "  brk #0\n"
 ".size _start,.-_start\n"
 );
+#elif defined(__riscv)
+// The global pointer is established first, without relaxation: a relaxed
+// `lla' would itself be addressed through the register it sets.
+__asm__(
+".text\n"
+".globl _start\n"
+".type _start,%function\n"
+"_start:\n"
+"  .weak __global_pointer$\n"
+"  .hidden __global_pointer$\n"
+"  .option push\n"
+"  .option norelax\n"
+"  lla gp, __global_pointer$\n"
+"  .option pop\n"
+"  li fp,0\n"
+"  li ra,0\n"
+"  mv a0,sp\n"
+"  andi sp,sp,-16\n"
+"  call __okl_start_c\n"
+"  ebreak\n"
+".size _start,.-_start\n"
+);
 #endif
 
 extern "C" [[noreturn]] void __okl_start_c(long* sp) {

@@ -142,8 +142,13 @@ enum : okl_long {
     nr_landlock_restrict_self = 446, nr_sysinfo = 99,
 };
 
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
 
+// TWO ARCHITECTURES, ONE TABLE. aarch64 and riscv64 take the kernel's
+// architecture-independent numbers (include/uapi/asm-generic/unistd.h); they
+// differ in the gate and its registers, and riscv64 has no `renameat', which
+// `okl::renameat' below reaches through `renameat2'.
+#if defined(__aarch64__)
 #define OKL_SVC(...) \
     register okl_long x8 __asm__("x8") = n; \
     register okl_long x0 __asm__("x0") = a0; \
@@ -199,6 +204,58 @@ inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d,
                          : "r"(x8) : "memory", "cc");
     return x0;
 }
+#else
+// THE GATE IS `ecall', the number in a7 and the arguments in a0 to a5; the
+// result returns in a0. Every argument register is an in/out operand, as on the
+// other architectures: a system-call translator may leave them rewritten.
+inline okl_long sys(okl_long n) {
+    register okl_long a7 __asm__("a7") = n; register okl_long a0 __asm__("a0");
+    __asm__ __volatile__("ecall" : "=r"(a0) : "r"(a7) : "memory");
+    return a0;
+}
+inline okl_long sys(okl_long n, okl_long a) {
+    register okl_long a7 __asm__("a7") = n; register okl_long a0 __asm__("a0") = a;
+    __asm__ __volatile__("ecall" : "+r"(a0) : "r"(a7) : "memory");
+    return a0;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b) {
+    register okl_long a7 __asm__("a7") = n; register okl_long a0 __asm__("a0") = a;
+    register okl_long a1 __asm__("a1") = b;
+    __asm__ __volatile__("ecall" : "+r"(a0), "+r"(a1) : "r"(a7) : "memory");
+    return a0;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c) {
+    register okl_long a7 __asm__("a7") = n; register okl_long a0 __asm__("a0") = a;
+    register okl_long a1 __asm__("a1") = b; register okl_long a2 __asm__("a2") = c;
+    __asm__ __volatile__("ecall" : "+r"(a0), "+r"(a1), "+r"(a2) : "r"(a7) : "memory");
+    return a0;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d) {
+    register okl_long a7 __asm__("a7") = n; register okl_long a0 __asm__("a0") = a;
+    register okl_long a1 __asm__("a1") = b; register okl_long a2 __asm__("a2") = c;
+    register okl_long a3 __asm__("a3") = d;
+    __asm__ __volatile__("ecall" : "+r"(a0), "+r"(a1), "+r"(a2), "+r"(a3) : "r"(a7) : "memory");
+    return a0;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d, okl_long e) {
+    register okl_long a7 __asm__("a7") = n; register okl_long a0 __asm__("a0") = a;
+    register okl_long a1 __asm__("a1") = b; register okl_long a2 __asm__("a2") = c;
+    register okl_long a3 __asm__("a3") = d; register okl_long a4 __asm__("a4") = e;
+    __asm__ __volatile__("ecall" : "+r"(a0), "+r"(a1), "+r"(a2), "+r"(a3), "+r"(a4)
+                         : "r"(a7) : "memory");
+    return a0;
+}
+inline okl_long sys(okl_long n, okl_long a, okl_long b, okl_long c, okl_long d,
+                    okl_long e, okl_long f) {
+    register okl_long a7 __asm__("a7") = n; register okl_long a0 __asm__("a0") = a;
+    register okl_long a1 __asm__("a1") = b; register okl_long a2 __asm__("a2") = c;
+    register okl_long a3 __asm__("a3") = d; register okl_long a4 __asm__("a4") = e;
+    register okl_long a5 __asm__("a5") = f;
+    __asm__ __volatile__("ecall" : "+r"(a0), "+r"(a1), "+r"(a2), "+r"(a3), "+r"(a4), "+r"(a5)
+                         : "r"(a7) : "memory");
+    return a0;
+}
+#endif
 
 enum : okl_long {
     nr_getcwd = 17, nr_ioctl = 29, nr_mkdirat = 34, nr_unlinkat = 35,
@@ -209,7 +266,12 @@ enum : okl_long {
     nr_nanosleep = 101, nr_clock_gettime = 113, nr_clock_getres = 114,
     nr_sched_yield = 124, nr_kill = 129, nr_tgkill = 131, nr_gettid = 178,
     nr_getpid = 172, nr_mmap = 222, nr_munmap = 215, nr_mprotect = 226, nr_msync = 227,
-    nr_clone = 220, nr_execve = 221, nr_wait4 = 260, nr_renameat = 38,
+#if defined(__aarch64__)
+    nr_renameat = 38,
+#else
+    nr_renameat = -1,
+#endif
+    nr_clone = 220, nr_execve = 221, nr_wait4 = 260,
     nr_dup3 = 24, nr_execveat = 281,
     nr_close_range = 436, nr_prlimit64 = 261, nr_dup2 = -1, nr_fcntl = 25,
     nr_prctl = 167, nr_sched_getaffinity = 123, nr_getppid = 173,
@@ -243,6 +305,11 @@ enum : okl_long {
     nr_setitimer = 103, nr_rt_sigreturn = 139, nr_process_vm_readv = 270,
     nr_landlock_create_ruleset = 444, nr_landlock_add_rule = 445,
     nr_landlock_restrict_self = 446, nr_sysinfo = 179,
+#if defined(__riscv)
+    // Only here: the instruction cache made to observe the data path's writes
+    // (arch/riscv/include/uapi/asm/unistd.h, __NR_arch_specific_syscall + 15).
+    nr_riscv_flush_icache = 259,
+#endif
 };
 
 #elif defined(__i386__)
@@ -343,7 +410,7 @@ enum : okl_long {
 };
 
 #else
-#error "openkal-linux supports x86_64, aarch64 and i386"
+#error "openkal-linux supports x86_64, aarch64, riscv64 and i386"
 #endif
 
 // --- error values, as the kernel returns them ------------------------------
@@ -367,11 +434,12 @@ enum : int {
 // THREE OF THESE ARE NOT THE SAME NUMBER ON BOTH ARCHITECTURES, AND WERE
 // WRITTEN AS THOUGH THEY WERE.
 //
-// `O_DIRECTORY', `O_NOFOLLOW' and `O_DIRECT' have one set of values on x86_64
-// and another in the kernel's architecture-independent header, which is what
-// aarch64 uses. The three values below were x86_64's:
+// `O_DIRECTORY', `O_NOFOLLOW' and `O_DIRECT' have one set of values in the
+// kernel's architecture-independent header (include/uapi/asm-generic/fcntl.h),
+// which x86_64, i386 and riscv64 take, and another in aarch64's own
+// (arch/arm64/include/uapi/asm/fcntl.h). The three values below were x86_64's:
 //
-//                     x86_64      aarch64 (asm-generic)
+//                     asm-generic aarch64
 //     O_DIRECTORY     0200000     040000
 //     O_NOFOLLOW      0400000     0100000
 //     O_DIRECT        040000      0200000
@@ -431,10 +499,10 @@ enum : okl_long {
     // "End this context when the one that started it ends", which is what
     // binding a started program's lifetime is expressed as here.
     pr_set_pdeathsig = 1,
-#if defined(__x86_64__) || defined(__i386__)
-    o_directory = 0200000, o_nofollow = 0400000,
-#else
+#if defined(__aarch64__)
     o_directory = 040000,  o_nofollow = 0100000,
+#else
+    o_directory = 0200000, o_nofollow = 0400000,
 #endif
     at_fdcwd = -100, at_removedir = 0x200, at_symlink_nofollow = 0x100,
     prot_read = 1, prot_write = 2, prot_exec = 4, prot_none = 0,
@@ -646,14 +714,34 @@ constexpr okl_uptr si_code_at   = 8;
 constexpr okl_uptr si_fields_at = sizeof(void*) == 8 ? 16 : 12;
 constexpr okl_uptr si_pid_at    = si_fields_at;
 constexpr okl_uptr si_status_at = si_fields_at + 8;
+// riscv64 has no SA_RESTORER: its record has no restorer field, and the kernel
+// returns from every handler through its vDSO's `__vdso_rt_sigreturn'. A
+// restorer written there would be read as the mask.
+#if defined(__riscv)
+struct k_sigaction { void* handler; okl_ulong flags; ksigset mask; };
+#else
 struct k_sigaction { void* handler; okl_ulong flags; void* restorer; ksigset mask; };
 constexpr okl_ulong sa_restorer_flag = 0x04000000u;  // SA_RESTORER
+#endif
 
 // The return from a handler this implementation installs, which a handler
 // installed without a C library must name on x86_64 and i386: one sequence
 // (observe.cpp), reached through this function so that no unit names another
 // unit's symbol outside this namespace (the independence check).
 void* signal_return();
+
+// A handler's record, with this implementation's return where the record has
+// one. Every unit that installs a handler with a restorer builds it here.
+inline k_sigaction handler_action(void* handler, okl_ulong flags) {
+    k_sigaction act{};
+    act.handler = handler;
+    act.flags   = flags;
+#if !defined(__riscv)
+    act.flags   |= sa_restorer_flag;
+    act.restorer = signal_return();
+#endif
+    return act;
+}
 
 // --- the calls whose arguments are not the same on every architecture ----------
 //
@@ -712,6 +800,15 @@ inline okl_long openat(okl_long dirfd, okl_long path, okl_long flags, okl_long m
     flags |= 0100000;  // O_LARGEFILE
 #endif
     return sys(nr_openat, dirfd, path, flags, mode);
+}
+
+// A rename that replaces: `renameat2' without flags where the table has no
+// `renameat' (riscv64), the same call.
+inline okl_long renameat(okl_long from, const char* a, okl_long to, const char* b) {
+    if constexpr (nr_renameat < 0)
+        return sys(nr_renameat2, from, reinterpret_cast<okl_long>(a), to, reinterpret_cast<okl_long>(b), 0);
+    else
+        return sys(nr_renameat, from, reinterpret_cast<okl_long>(a), to, reinterpret_cast<okl_long>(b));
 }
 
 inline okl_long fstat(okl_long fd, kstat* st) {
