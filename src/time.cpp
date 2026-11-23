@@ -29,7 +29,7 @@ struct elf_phdr { unsigned type, flags; okl_u64 offset, vaddr, paddr, filesz, me
 struct elf_dyn  { long long tag; okl_u64 val; };
 struct elf_sym  { unsigned name; unsigned char info, other; unsigned short shndx; okl_u64 value, size; };
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__riscv)
 constexpr const char kClockName[] = "__vdso_clock_gettime";
 #else
 constexpr const char kClockName[] = "__kernel_clock_gettime";

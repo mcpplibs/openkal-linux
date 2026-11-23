@@ -178,6 +178,17 @@ inline tls_block make_tls(void* (*alloc)(okl_uptr, okl_uptr)) {
     fill(base, 0, b.bytes);
     if (im.data && im.filesz) copy(base + gap, im.data, im.filesz);
     b.tp = base;
+#elif defined(__riscv)
+    // Variant I without a gap: the thread pointer addresses the first byte of
+    // the storage (the psABI's TLS offsets begin at zero), aligned as the
+    // segment states.
+    b.bytes = round_up(im.memsz, laid_out) + 64;
+    b.base  = alloc(b.bytes, align);
+    if (!b.base) return b;
+    auto* base = static_cast<unsigned char*>(b.base);
+    fill(base, 0, b.bytes);
+    if (im.data && im.filesz) copy(base, im.data, im.filesz);
+    b.tp = base;
 #endif
     return b;
 }
@@ -213,6 +224,8 @@ inline void set_thread_pointer(void* tp) {
     sys(nr_arch_prctl, 0x1002 /* ARCH_SET_FS */, reinterpret_cast<okl_long>(tp));
 #elif defined(__aarch64__)
     __asm__ __volatile__("msr tpidr_el0, %0" :: "r"(tp));
+#elif defined(__riscv)
+    __asm__ __volatile__("mv tp, %0" :: "r"(tp));
 #endif
 }
 

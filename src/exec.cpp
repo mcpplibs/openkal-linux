@@ -56,6 +56,16 @@ bool branch_targets() {
     return false;
 #endif
 }
+// The instruction path made to observe the data path's writes, where the
+// environment offers it as a call of its own (kal_exec_publish).
+void sync_instructions(void* at, okl_uptr bytes) {
+#if defined(__riscv)
+    const auto from = reinterpret_cast<okl_long>(at);
+    okl::sys(okl::nr_riscv_flush_icache, from, from + static_cast<okl_long>(bytes), 0);
+#else
+    (void)at; (void)bytes;
+#endif
+}
 }  // namespace
 
 extern "C" {
@@ -136,6 +146,10 @@ int kal_exec_publish(void* p, kal_uintptr size) {
     //
     // All three agree about what the PROGRAM must do, which is what the
     // specification actually states.
+    //
+    // riscv64 is the case the rule names: its kernel offers the maintenance as
+    // a system call (`riscv_flush_icache'), so it is performed there.
+    sync_instructions(p, bytes);
     return kal_ok;
 }
 
@@ -150,7 +164,9 @@ int kal_exec_publish_part(void* region, kal_uintptr offset, kal_uintptr size) {
     const okl_long r = okl::sys(okl::nr_mprotect,
                                 reinterpret_cast<okl_long>(static_cast<char*>(region) + offset),
                                 static_cast<okl_long>(size), okl::prot_read | okl::prot_exec);
-    return okl::failed(r) ? okl::translate(r) : kal_ok;
+    if (okl::failed(r)) return okl::translate(r);
+    sync_instructions(static_cast<char*>(region) + offset, size);
+    return kal_ok;
 }
 
 // SEALED READ-ONLY (0.23): the protection, and, for ever, `mseal' (Linux 6.10)

@@ -42,10 +42,28 @@ bool peek(okl_uptr at, void* out, okl_uptr n) {
     iov local{ out, n };
     iov remote{ reinterpret_cast<void*>(at), n };
     static okl_long self = 0;
+    static int readv_absent = 0;
     if (self == 0) self = okl::sys(okl::nr_getpid);
-    const okl_long r = okl::sys(okl::nr_process_vm_readv, self, reinterpret_cast<okl_long>(&local), 1,
-                                reinterpret_cast<okl_long>(&remote), 1, 0);
-    return r == static_cast<okl_long>(n);
+    if (!__atomic_load_n(&readv_absent, __ATOMIC_RELAXED)) {
+        const okl_long r = okl::sys(okl::nr_process_vm_readv, self, reinterpret_cast<okl_long>(&local), 1,
+                                    reinterpret_cast<okl_long>(&remote), 1, 0);
+        if (r != -okl::e_nosys) return r == static_cast<okl_long>(n);
+        __atomic_store_n(&readv_absent, 1, __ATOMIC_RELAXED);
+    }
+    // WITHOUT `process_vm_readv' (a kernel built without CROSS_MEMORY_ATTACH;
+    // qemu's user-mode translator answers ENOSYS, measured with 8.2.2 on
+    // riscv64, and every chain then ended at its first frame) the bytes pass
+    // through a pipe of this call's own: its write answers EFAULT for an address
+    // that cannot be read, and no other context shares it.
+    int fds[2] = { -1, -1 };
+    if (okl::failed(okl::sys(okl::nr_pipe2, reinterpret_cast<okl_long>(fds), okl::o_cloexec))) return false;
+    const bool ok = okl::sys(okl::nr_write, fds[1], static_cast<okl_long>(at), static_cast<okl_long>(n))
+                        == static_cast<okl_long>(n)
+                    && okl::sys(okl::nr_read, fds[0], reinterpret_cast<okl_long>(out), static_cast<okl_long>(n))
+                        == static_cast<okl_long>(n);
+    okl::sys(okl::nr_close, fds[0]);
+    okl::sys(okl::nr_close, fds[1]);
+    return ok;
 }
 
 // --- writing without a C library ------------------------------------------
@@ -244,9 +262,26 @@ frame_regs from_context(void* uc) {
     okl::copy(&r.fp, b + mc + 8 + 29 * 8, 8);
     okl::copy(&r.sp, b + mc + 8 + 31 * 8, 8);
     okl::copy(&r.pc, b + mc + 8 + 32 * 8, 8);
+#elif defined(__riscv)
+    // flags, link, stack (24), the signal mask with its reserve (128), then
+    // the sigcontext at a sixteen-byte boundary (its floating-point state is
+    // aligned so): pc, then x1..x31 --- ra, sp at x2, the frame pointer s0 at x8.
+    constexpr okl_uptr mc = 176;
+    okl::copy(&r.pc, b + mc, 8);
+    okl::copy(&r.sp, b + mc + 2 * 8, 8);
+    okl::copy(&r.fp, b + mc + 8 * 8, 8);
 #endif
     return r;
 }
+
+// Where a frame's record {the caller's frame pointer, the return address} lies
+// relative to the frame pointer: at it on x86_64, i386 and aarch64; on riscv64
+// the frame pointer is the frame's top, and the record is the two words below.
+#if defined(__riscv)
+constexpr okl_uptr frame_record_below = 2 * sizeof(okl_uptr);
+#else
+constexpr okl_uptr frame_record_below = 0;
+#endif
 
 // The return addresses of a chain of frame pointers.
 int walk(frame_regs r, okl_uptr* pcs, int max) {
@@ -256,7 +291,7 @@ int walk(frame_regs r, okl_uptr* pcs, int max) {
     for (int i = 0; i < 256 && n < max; ++i) {
         if (fp == 0 || (fp & (sizeof(okl_uptr) - 1)) != 0 || fp < r.sp) break;
         okl_uptr pair[2];
-        if (!peek(fp, pair, sizeof pair)) break;
+        if (!peek(fp - frame_record_below, pair, sizeof pair)) break;
         if (pair[1] == 0) break;
         pcs[n++] = pair[1];
         if (pair[0] <= fp) break;      // a chain runs toward older frames
@@ -309,7 +344,7 @@ void report(int signo, void* info, void* uc) {
 
 
 using okl::k_sigaction;
-constexpr unsigned long sa_siginfo = 4, sa_onstack = 0x08000000, sa_restorer = 0x04000000,
+constexpr unsigned long sa_siginfo = 4, sa_onstack = 0x08000000,
                         sa_resethand = 0x80000000, sa_restart = 0x10000000;
 
 alignas(16) unsigned char g_alt_stack[256 * 1024];
@@ -331,9 +366,8 @@ alignas(16) unsigned char g_alt_stack[256 * 1024];
         // A disposition the program was started with, other than the default,
         // is the program's to keep.
         if (old.handler != nullptr) continue;
-        k_sigaction act{ reinterpret_cast<void*>(&okl_fault_handler),
-                         sa_siginfo | sa_onstack | sa_restorer,
-                         reinterpret_cast<void*>(&okl_signal_return), 0 };
+        k_sigaction act = okl::handler_action(reinterpret_cast<void*>(&okl_fault_handler),
+                                              sa_siginfo | sa_onstack);
         okl::sys(okl::nr_rt_sigaction, signo, reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
     }
 }
@@ -542,8 +576,8 @@ int kal_prof_sample_begin(kal_u32 per_second) {
         g_ring.ready = reinterpret_cast<volatile okl_uptr*>(m + static_cast<okl_long>(cap * sizeof(kal_prof_sample)));
         g_ring.cap = cap;
     }
-    k_sigaction act{ reinterpret_cast<void*>(&okl_sample_handler), sa_siginfo | sa_restart | sa_restorer,
-                     reinterpret_cast<void*>(&okl_signal_return), 0 };
+    k_sigaction act = okl::handler_action(reinterpret_cast<void*>(&okl_sample_handler),
+                                          sa_siginfo | sa_restart);
     if (okl::failed(okl::sys(okl::nr_rt_sigaction, 27 /* SIGPROF */, reinterpret_cast<okl_long>(&act),
                              reinterpret_cast<okl_long>(&g_prof_before), sizeof act.mask)))
         return kal_err_not_supported;
@@ -608,8 +642,8 @@ int kal_prof_touch_begin(const void* at, kal_uintptr size) {
     if (now.handler != reinterpret_cast<void*>(&okl_fault_handler)) {
         g_segv_before = now;
         g_segv_replaced = true;
-        k_sigaction act{ reinterpret_cast<void*>(&okl_fault_handler), sa_siginfo | sa_onstack | sa_restorer,
-                         reinterpret_cast<void*>(&okl_signal_return), 0 };
+        k_sigaction act = okl::handler_action(reinterpret_cast<void*>(&okl_fault_handler),
+                                              sa_siginfo | sa_onstack);
         okl::sys(okl::nr_rt_sigaction, 11, reinterpret_cast<okl_long>(&act), 0, sizeof act.mask);
     }
     const int k = __atomic_load_n(&g_part_count, __ATOMIC_ACQUIRE);

@@ -8,8 +8,38 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.26.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.27.0"
+openkal-linux = "0.27.1"
 ```
+
+## What 0.27.1 adds
+
+**riscv64.** The kernel's riscv64 gate (`ecall`, the number in `a7`, the arguments in
+`a0` to `a5`) beside aarch64's, over the one table of numbers both take from the
+kernel's architecture-independent header; riscv64 has no `renameat`, and a rename
+that replaces is `renameat2` without flags there (`okl::renameat`). The thread pointer
+is `tp`, the storage beginning at it (variant I without a gap); `_start` sets the
+global pointer before anything else; `clone` is the generic order. Its kernel's
+records: the `O_DIRECTORY` and `O_NOFOLLOW` of the architecture-independent header,
+which x86_64 and i386 take as well, and a handler's record without a restorer (the
+kernel returns through its vDSO's `__vdso_rt_sigreturn`), which every unit builds
+through `okl::handler_action`; the clock is the vDSO's `__vdso_clock_gettime`. A
+sample and a fault report read the context's `pc`, `sp` and `s0`, and the frame chain
+from the two words below each frame pointer. Published instructions are made visible
+to the instruction path through `riscv_flush_icache`, the maintenance the kernel
+offers as a call of its own (`kal_exec_publish`, `kal_exec_publish_part`).
+
+**A frame chain without `process_vm_readv`.** A kernel built without
+CROSS_MEMORY_ATTACH, and qemu's user-mode translator (measured with 8.2.2), answer
+ENOSYS, and every sample and fault report then ended at its first frame. The words
+of a frame pass through a pipe of the read's own instead, whose write answers EFAULT
+for an address that cannot be read.
+
+`tools/arch-check.sh` (formerly `tools/word32-check.sh`) builds the implementation
+standalone for i386 and riscv64 and runs `tests/arch/runs.cpp`, i386 on the x86_64
+machine and riscv64 under `qemu-riscv64`: a file past four gibibytes, a node's kind
+and size, a directory made, opened and listed, a rename into it, a task with its own
+thread-local storage, the clock, the processor time, a sample holding the frames
+above the work, and published instructions run.
 
 ## What 0.27 changes (openkal 0.26)
 

@@ -468,15 +468,22 @@ jobs:
           rm -f "$RUNNER_TEMP/android.bad"
           echo "both Android ABIs build from this implementation unchanged, and name no C library symbol"
 
-      # A THIRTY-TWO BIT BUILD RUNS (openkal 0.25.1, clause 5.5). The same
-      # sources, standalone, for i386: built with the toolchain's clang and lld
-      # and RUN here, since an x86_64 kernel executes a static i386 program. A
-      # file past four gibibytes, a task with its own thread-local storage and a
-      # sleep through the sixty-four bit clock; the conformance suite runs for
-      # i686 where the family's C library and C++ runtime are built for it.
-      - name: An i386 build of this implementation runs
+      # THE ARCHITECTURES THIS MACHINE DOES NOT RUN NATIVELY RUN (tools/arch-check.sh).
+      # The same sources, standalone, built with the toolchain's clang and lld:
+      # i386 (openkal 0.25.1, clause 5.5) runs here, since an x86_64 kernel
+      # executes a static i386 program; riscv64 runs under qemu's user-mode
+      # translator. Each architecture's gate and numbers, the kernel's records, the
+      # thread pointer, the clock, a handler's record with the frame chain, and
+      # published instructions; the conformance suite runs for these rows where
+      # the family's C library and C++ runtime are built for them.
+      - name: The i386 and riscv64 builds of this implementation run
         if: matrix.toolchain == 'llvm@22.1.8'
-        run: OPENKAL_INCLUDE="$PWD/.spec/include" bash tools/word32-check.sh
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq qemu-user > /dev/null
+          for arch in i386 riscv64; do
+            OPENKAL_INCLUDE="$PWD/.spec/include" bash tools/arch-check.sh "$arch"
+          done
 
       # A checker is only useful if it fails when it should.
       - name: The independence check detects a dependence
