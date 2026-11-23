@@ -1493,6 +1493,16 @@ bool cpu_ns(okl_long pid, bool self, okl_u64& out) {
     return true;
 }
 
+// The page faults of a program from its entry (fields 10 and 12), which the
+// kernel keeps until the program is collected.
+bool entry_faults(okl_long pid, okl_u64& minor, okl_u64& major) {
+    char b[1024];
+    const okl_long len = read_stat(pid, b);
+    bool a = false, c = false;
+    if (len > 0) { minor = stat_number(b, len, 10, a); major = stat_number(b, len, 12, c); }
+    return a && c;
+}
+
 // Whether a program has ended. A started one: `waitid' without collecting it
 // (WNOWAIT), and one already collected has ended too. One found by its
 // identifier: its descriptor is readable once it has ended.
@@ -1616,11 +1626,7 @@ int kal_process_info(kal_process p, kal_u32 wanted, kal_program_info* out) {
             ok = !okl::failed(okl::sys(okl::nr_getrusage, 0 /* RUSAGE_SELF */, reinterpret_cast<okl_long>(&ru)));
             minor = static_cast<okl_u64>(ru.rest[3]); major = static_cast<okl_u64>(ru.rest[4]);
         } else if (!ended) {
-            char b[1024];
-            const okl_long len = read_stat(pid, b);
-            bool a = false, c = false;
-            if (len > 0) { minor = stat_number(b, len, 10, a); major = stat_number(b, len, 12, c); }
-            ok = a && c;
+            ok = entry_faults(pid, minor, major);
         } else if (handle_kind(p) == kind_child) {
             ok = okl::child_faults(pid, minor, major);
         }
@@ -1777,14 +1783,29 @@ bool resident(okl_long pid, okl_u64& now, okl_u64& peak) {
 }
 
 // An ended program not yet collected: its record, read without collecting it.
-bool ended_usage(okl_long pid, k_rusage& ru) {
+// Answers whether the program was reported; `written' states whether the record
+// was.
+//
+// The record is the fifth argument of `waitid', which Linux adds to the call
+// and writes whole when it reports a program. A translator may take the call
+// and not the argument: qemu's user-mode translator (8.2) passes no record to
+// the host and leaves this one as it was, and its zeros were read as a program
+// that used no processor time and whose peak was nothing. The peak is set to a
+// value the kernel never writes, so a record that was not written is known as
+// such. A program that was reported is not yet collected, so its identifier is
+// still its own and its entry answers what the entry keeps (child_cpu,
+// child_faults).
+bool ended_usage(okl_long pid, k_rusage& ru, bool& written) {
     alignas(8) unsigned char info[128] = {};
+    ru = k_rusage{};
+    ru.maxrss = -1;
     const okl_long r = okl::sys(okl::nr_waitid, 1 /* P_PID */, pid, reinterpret_cast<okl_long>(info),
                                 4 | 1 | 0x01000000 /* WEXITED | WNOHANG | WNOWAIT */,
                                 reinterpret_cast<okl_long>(&ru));
     if (okl::failed(r)) return false;
     int si_pid = 0;
     okl::copy(&si_pid, info + okl::si_pid_at, sizeof si_pid);
+    written = ru.maxrss >= 0;
     return si_pid != 0;
 }
 
@@ -1923,8 +1944,11 @@ void job_forget(okl_long unit) {
 
 bool child_memory(okl_long pid, bool ended, okl_u64& now, okl_u64& peak) {
     if (!ended) return resident(pid, now, peak);
+    // An ended program has no memory left to read, so only the record states
+    // its peak.
     k_rusage ru{};
-    if (!ended_usage(pid, ru)) return false;
+    bool written = false;
+    if (!ended_usage(pid, ru, written) || !written) return false;
     now = 0;
     peak = static_cast<okl_u64>(ru.maxrss) * 1024;
     return true;
@@ -1933,15 +1957,21 @@ bool child_memory(okl_long pid, bool ended, okl_u64& now, okl_u64& peak) {
 // The page faults of an ended program not yet collected (0.23).
 bool child_faults(okl_long pid, okl_u64& minor, okl_u64& major) {
     k_rusage ru{};
-    if (!ended_usage(pid, ru)) return false;
-    minor = static_cast<okl_u64>(ru.rest[3]);
-    major = static_cast<okl_u64>(ru.rest[4]);
-    return true;
+    bool written = false;
+    if (!ended_usage(pid, ru, written)) return false;
+    if (written) {
+        minor = static_cast<okl_u64>(ru.rest[3]);
+        major = static_cast<okl_u64>(ru.rest[4]);
+        return true;
+    }
+    return entry_faults(pid, minor, major);
 }
 
 bool child_cpu(okl_long pid, okl_u64& ns) {
     k_rusage ru{};
-    if (!ended_usage(pid, ru)) return false;
+    bool written = false;
+    if (!ended_usage(pid, ru, written)) return false;
+    if (!written) return cpu_ns(pid, false, ns);
     ns = static_cast<okl_u64>(ru.utime_s + ru.stime_s) * 1000000000ull
        + static_cast<okl_u64>(ru.utime_us + ru.stime_us) * 1000ull;
     return true;
