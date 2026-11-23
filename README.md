@@ -8,8 +8,34 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.26.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.27.1"
+openkal-linux = "0.27.2"
 ```
+
+## What 0.27.2 fixes
+
+**The riscv64 record of a signal's action is 32 bytes.** The kernel's record is
+24 bytes (handler, flags, mask). qemu's user-mode translator (8.2, and 7.2) lays it
+out with a restorer before the mask: it writes 32 bytes for the action it returns
+and reads the mask at the fourth word. The eight bytes after a 24-byte record were
+overwritten, measured as a started image whose reset of the signals' actions
+returned to its first signal on every query and never reached the replacement.
+The record carries a fourth word, the size musl gives it; no action this
+implementation installs states a mask, so the kernel and the translator read the
+same one.
+
+**An ended program's record is read only where it was written.** The usage of an
+ended program not yet collected is the fifth argument of `waitid`, which Linux
+writes whole when it reports the program. qemu's user-mode translator (8.2) takes
+the call without the argument, and the zeros it left were read as a program with
+no processor time and a peak of nothing. The peak is preset to a value the kernel
+never writes, so a record that was not written is known as such. The program is
+then not yet collected, and its entry answers what the entry keeps: the processor
+time through the program's clock and the page faults from `/proc/<pid>/stat`, as
+for a running program. Its peak is in the record alone, and is reported as
+unavailable (`KAL_PINFO_MEMORY` absent), not as zero.
+
+`tests/arch/runs.cpp` checks that a queried action leaves the word after its record
+intact, starts a program and reads its status, and reads its peak only as stated.
 
 ## What 0.27.1 adds
 

@@ -5,7 +5,8 @@
 // gate and its numbers (a file past four gibibytes, a directory opened and listed, a rename), the
 // kernel's records (a node's kind and size), the thread pointer (a task with its own thread-local
 // storage), the clock, a handler's record and the frame chain (a sample of the program's own stack),
-// and published instructions run. The program supplies the C library facilities the compiler calls.
+// the record of a signal's action as the kernel and the translator each write it, a started
+// program and its peak, and published instructions run. The program supplies the C library facilities the compiler calls.
 #include <openkal/stream.h>
 #include <openkal/fs.h>
 #include <openkal/task.h>
@@ -14,6 +15,7 @@
 #include <openkal/process.h>
 #include <openkal/exec.h>
 #include <openkal/prof.h>
+#include "../../src/sys.h"
 
 #if defined(__i386__)
 #define OKL_ARCH "i386"
@@ -122,6 +124,33 @@ extern "C" int main(int, char**, char**) {
         for (kal_intptr i = 0; i < got; ++i) deep = deep || (samples[i].depth >= 3 && samples[i].pc[0] != 0);
         check(got > 0 && deep, "a sample holds the work and the frames above it");
     }
+    // The record of a signal's action is as long as what is written into it: the kernel writes its
+    // own record, and qemu's user-mode translator writes the riscv64 record with a restorer slot.
+    struct { okl::k_sigaction act; volatile okl_u64 guard; } probe{};
+    probe.guard = 0x5a5a5a5a5a5a5a5aull;
+    const bool queried = !okl::failed(okl::sys(okl::nr_rt_sigaction, 1 /* SIGHUP */, 0,
+                                               reinterpret_cast<okl_long>(&probe.act), sizeof probe.act.mask));
+    check(queried && probe.guard == 0x5a5a5a5a5a5a5a5aull, "an action's record holds what is written into it");
+    // A started program: the started image queries and resets every signal's action through the
+    // kernel's record before it is replaced, and ends with the status it was given. The program
+    // is the host's shell, which the translator hands to the host kernel.
+    kal_dir root{};
+    for (kal_uintptr i = 0; i < n; ++i)
+        if (kal_fs_preopen(i, &root, name, sizeof name, &name_len) == kal_ok && name_len == 1 && name[0] == '/')
+            break;
+    const char* argv[] = { "sh", "-c", "exit 3" };
+    const kal_uintptr argv_lens[] = { 2, 2, 6 };
+    kal_spawn how{}; how.base = root; how.work = work;
+    kal_process child{};
+    int status = -1, terminated = 1;
+    check(kal_process_spawn(&how, "bin/sh", 6, argv, argv_lens, 3, nullptr, nullptr, 0, nullptr, &child) == kal_ok
+              && kal_process_wait(child, &status, &terminated) == kal_ok && status == 3 && terminated == 0,
+          "a started program ends with its own status");
+    kal_program_info ended{}; ended.self_size = sizeof ended;
+    check(kal_process_info(child, KAL_PINFO_MEMORY, &ended) == kal_ok
+              && ((ended.present & KAL_PINFO_MEMORY) == 0 || ended.memory_peak_bytes > 0),
+          "an ended program's peak is stated only from a record the kernel wrote");
+    kal_process_close(child);
     // Published instructions run.
     void* code = kal_exec_alloc(sizeof answer_code);
     bool ran = false;

@@ -717,8 +717,19 @@ constexpr okl_uptr si_status_at = si_fields_at + 8;
 // riscv64 has no SA_RESTORER: its record has no restorer field, and the kernel
 // returns from every handler through its vDSO's `__vdso_rt_sigreturn'. A
 // restorer written there would be read as the mask.
+//
+// The record is nevertheless 32 bytes and not the kernel's 24. qemu-user (8.2,
+// and 7.2 that the platform's runner supplies) lays out the riscv64 record with
+// a restorer before the mask: it writes 32 bytes for the action it returns and
+// reads the mask at the fourth word. A record of 24 bytes had the eight bytes
+// after it overwritten --- measured as the loop over the signals in a started
+// image reset to its first signal on every query, so that the start never
+// ended. The fourth word is the size musl gives the same record for the same
+// reason. No action this implementation installs states a mask, so both
+// readers find the same empty one.
 #if defined(__riscv)
-struct k_sigaction { void* handler; okl_ulong flags; ksigset mask; };
+struct k_sigaction { void* handler; okl_ulong flags; ksigset mask; ksigset beyond; };
+static_assert(sizeof(k_sigaction) == 32);
 #else
 struct k_sigaction { void* handler; okl_ulong flags; void* restorer; ksigset mask; };
 constexpr okl_ulong sa_restorer_flag = 0x04000000u;  // SA_RESTORER
