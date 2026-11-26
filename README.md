@@ -8,8 +8,21 @@ for Linux, written on the kernel's own system-call interface.
 openkal = "0.26.0"
 
 [target.'cfg(os = "linux")'.dependencies]
-openkal-linux = "0.27.2"
+openkal-linux = "0.27.3"
 ```
+
+## What 0.27.3 fixes
+
+**The tables of attenuated directories take no bytes of a program.** The table of
+handles (4,096 entries of 32 bytes) and the table of roots (64 of 168 bytes) began
+with members initialised to -1 (no descriptor, no root, no record), so the compiler
+placed both, 141,824 bytes, in `.data`: every program that links the attenuation
+carried them in its file and loaded them, whether it attenuated a directory or
+not. A free entry and a free root are now all zero bytes, an entry known to be in
+use by its `used` flag and a root by `live` as before, and each is given its values
+where it is made (`new_entry`, `new_root`): both tables lie in `.bss`. Measured
+with omui's smallest terminal application, which links them through mcpplibs.os:
+141,824 bytes fewer loaded (from `.data` to `.bss`), its behaviour the same.
 
 ## What 0.27.2 fixes
 
