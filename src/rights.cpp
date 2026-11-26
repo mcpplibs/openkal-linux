@@ -81,6 +81,11 @@ struct keyset {
 // A ROOT is one attenuation: the directory it was made of, its rights, its
 // record and what it has listed. Every handle derived from it names the root
 // and the path beneath it.
+//
+// BOTH TABLES ARE ZERO UNTIL USED. A free root and a free entry are all zero
+// bytes, and each is given its values where it is made (new_root, new_entry):
+// so the tables lie in .bss, and a program that never attenuates a directory
+// carries none of their 138 KiB in its file or its data.
 constexpr int kRoots = 64;
 constexpr okl_uptr kBatch = 64 * 1024;
 
@@ -88,9 +93,9 @@ struct root {
     bool       live = false;
     int        refs = 0;
     okl_u32    flags = 0;
-    int        base = -1;        // a descriptor of the root, to list beneath
+    int        base = 0;         // a descriptor of the root, to list beneath (-1 for none: new_root)
     // The record.
-    int        record = -1;      // opened to append
+    int        record = 0;       // opened to append (-1 for none: new_root)
     char*      rprefix = nullptr; // where this root lies beneath the directory the record is of
     okl_uptr   rplen = 0;
     keyset     seen;             // kind and name, once each
@@ -105,10 +110,12 @@ struct root {
 };
 root g_roots[kRoots];
 
-// A HANDLE: its root and the path of its directory beneath the root.
+// A HANDLE: its root and the path of its directory beneath the root. Free
+// while `used` is not set.
 struct entry {
-    int      fd = -1;
-    int      root = -1;
+    bool     used = false;
+    int      fd = 0;
+    int      root = 0;          // -1 for none: new_entry
     okl_u32  flags = 0;
     char*    prefix = nullptr;
     okl_uptr plen = 0;
@@ -125,7 +132,11 @@ entry* entry_of(int fd) {
 entry* new_entry(int fd) {
     if (fd < 0 || fd >= okl::kMaxDescriptor) return nullptr;
     for (int i = 0; i < kEntries; ++i)
-        if (g_entries[i].fd < 0) { g_entries[i].fd = fd; g_slot[fd] = static_cast<unsigned short>(i + 1); return &g_entries[i]; }
+        if (!g_entries[i].used) {
+            g_entries[i] = entry{.used = true, .fd = fd, .root = -1};
+            g_slot[fd] = static_cast<unsigned short>(i + 1);
+            return &g_entries[i];
+        }
     return nullptr;
 }
 
@@ -133,11 +144,18 @@ void drop_entry(entry* e) {
     if (!e) return;
     if (e->fd >= 0 && e->fd < okl::kMaxDescriptor) g_slot[e->fd] = 0;
     give_back(e->prefix, e->plen + 1);
-    *e = entry{};
+    *e = entry{};                 // free: zero again
 }
 
 int new_root() {
-    for (int i = 0; i < kRoots; ++i) if (!g_roots[i].live) { g_roots[i] = root{}; g_roots[i].live = true; return i; }
+    for (int i = 0; i < kRoots; ++i)
+        if (!g_roots[i].live) {
+            g_roots[i] = root{};
+            g_roots[i].live = true;
+            g_roots[i].base = -1;
+            g_roots[i].record = -1;
+            return i;
+        }
     return -1;
 }
 
